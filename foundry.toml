@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+libs = ["lib"]
+solc = "0.8.28"
+evm_version = "cancun"
+remappings = [
+  "forge-std/=lib/forge-std/src/",
+  "hl-price-guard/=lib/hl-price-guard/src/",
+]
+
+[rpc_endpoints]
+hyperevm = "https://rpc.hyperliquid.xyz/evm"
