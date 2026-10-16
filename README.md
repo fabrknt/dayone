@@ -22,6 +22,6 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
 
 ## Not done
-Testnet deployment, the operator's market-hours switch in the keeper, audit.
+Testnet deployment (prepared: docs/testnet.md, needs a funded key with big blocks on), the operator's market-hours switch in the keeper, audit.
 
 `forge test` (17 tests); `npm install && ./keeper/e2e.sh`.
