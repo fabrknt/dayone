@@ -6,34 +6,7 @@ import {HLPrecompiles} from "hl-price-guard/HLPrecompiles.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 import {ExposureBudget} from "hl-price-guard/ExposureBudget.sol";
 import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
-import {MockPrecompile} from "./Mocks.sol";
-
-contract MockUSDC {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 a) external {
-        balanceOf[to] += a;
-    }
-
-    function approve(address s, uint256 a) external returns (bool) {
-        allowance[msg.sender][s] = a;
-        return true;
-    }
-
-    function transfer(address to, uint256 a) external returns (bool) {
-        balanceOf[msg.sender] -= a;
-        balanceOf[to] += a;
-        return true;
-    }
-
-    function transferFrom(address f, address to, uint256 a) external returns (bool) {
-        allowance[f][msg.sender] -= a;
-        balanceOf[f] -= a;
-        balanceOf[to] += a;
-        return true;
-    }
-}
+import {MockPrecompile, MockUSDC} from "./Mocks.sol";
 
 contract MockRef is IRefSource {
     HLPriceGuard.Ref internal r;

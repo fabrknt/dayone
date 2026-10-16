@@ -2,6 +2,7 @@
 src = "src"
 test = "test"
 libs = ["lib"]
+fs_permissions = [{ access = "write", path = "./keeper" }]
 solc = "0.8.28"
 evm_version = "cancun"
 remappings = [
