@@ -71,18 +71,8 @@ contract LaunchPoolTest is Test {
             IERC20(address(usdc)),
             HLPriceGuard.Asset({dex: 1, index: 1, szDecimals: 3}),
             HLPriceGuard.Bounds({maxMarkOracleBps: 25, maxMidOracleBps: 25, maxSpreadBps: 20, maxRefOracleBps: 150}),
-            LaunchPool.Params({
-                maxLeverage: 20,
-                maintenanceBps: 250,
-                feeBps: 5,
-                settleDelay: 3,
-                capWindow: 60,
-                capPerWindow: 1_000_000 * USDC,
-                maxNotional: 500_000 * USDC,
-                maxJumpBps: 200,
-                maxNetNotional: 1_500_000 * USDC
-            }),
-            2_000_000 * USDC
+            defaultParams(),
+            0
         );
         for (uint256 i; i < 2; i++) {
             address u = i == 0 ? alice : bob;
@@ -90,6 +80,23 @@ contract LaunchPoolTest is Test {
             vm.prank(u);
             usdc.approve(address(pool), type(uint256).max);
         }
+    }
+
+    function defaultParams() internal pure returns (LaunchPool.Params memory) {
+        return LaunchPool.Params({
+            maxLeverage: 20,
+            maintenanceBps: 250,
+            feeBps: 5,
+            settleDelay: 3,
+            capWindow: 60,
+            capPerWindow: 1_000_000 * USDC,
+            maxNotional: 500_000 * USDC,
+            maxJumpBps: 200,
+            maxNetNotional: 1_500_000 * USDC,
+            winHaircutBps: 3000,
+            rebateBps: 2000,
+            redeemBufferBps: 1000
+        });
     }
 
     /// Oracle, mark and a tight book all at `px`.
@@ -130,27 +137,27 @@ contract LaunchPoolTest is Test {
         vm.warp(block.timestamp + 60);
         close(alice, id); // loss $1,000 + $50 close fee
         assertEq(pool.poolBalance(), 1_100 * USDC); // both fees + loss
-        assertEq(pool.shares(alice), 1_000 * USDC * 100); // fees do not mint shares
+        assertEq(pool.shares(alice), 200 * USDC); // 20% of the $1,000 loss; fees do not count
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 1_100 * USDC);
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
     function test_unpaidProfitQueuesAndIsPaidFromLaterLosses() public {
         uint256 id = open(alice, true, 10_000 * USDC, 10);
-        setPx(353_500); // +1%: profit $1,000 - $50 close fee, pool holds only the $50 open fee
+        setPx(353_500); // +1%: ($1,000 - $50 close fee) * 70% = $665 owed; the pool holds $50
         vm.warp(block.timestamp + 60);
         close(alice, id);
-        assertEq(pool.totalDebt(), 900 * USDC); // 950 owed, 50 paid from the pool
+        assertEq(pool.totalDebt(), 615 * USDC);
         assertEq(pool.poolBalance(), 0);
 
         vm.warp(block.timestamp + 60);
         uint256 id2 = open(bob, true, 10_000 * USDC, 10); // bob's $50 open fee goes to alice first
-        assertEq(pool.totalDebt(), 850 * USDC);
+        assertEq(pool.totalDebt(), 565 * USDC);
         setPx(350_000); // bob loses 1%
         vm.warp(block.timestamp + 60);
         close(bob, id2);
         assertEq(pool.totalDebt(), 0);
-        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC + 900 * USDC); // +950 profit - 50 open fee
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC + 615 * USDC); // +665 - 50 open fee
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance()); // nothing open: tokens == books
     }
 
@@ -202,7 +209,7 @@ contract LaunchPoolTest is Test {
         pool.liquidate(id);
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 100 * USDC - 6_000 * USDC);
         assertEq(pool.poolBalance(), 6_100 * USDC);
-        assertEq(pool.shares(alice), 6_000 * USDC * 100);
+        assertEq(pool.shares(alice), 1_200 * USDC); // 20% of $6,000
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
@@ -274,6 +281,75 @@ contract LaunchPoolTest is Test {
             abi.encodeWithSelector(LaunchPool.NetExposureExceeded.selector, 2_010_000 * USDC, 1_500_000 * USDC)
         );
         pool.settle(id);
+    }
+
+    /// Two own accounts, one long and one short of the same size: one loses what the other wins.
+    /// The rebate dilutes the other shareholders, while the haircut and fees go to all of them.
+    /// With rebate (20%) below the haircut (30%) and outsiders holding most shares, the pair loses.
+    function test_washTradingLoses() public {
+        address carol = address(0xCA201);
+        usdc.mint(carol, 100_000 * USDC);
+        vm.prank(carol);
+        usdc.approve(address(pool), type(uint256).max);
+        uint256 c = open(carol, true, 25_000 * USDC, 20); // carol loses 2% of $500K
+        setPx(343_000);
+        vm.warp(block.timestamp + 60);
+        close(carol, c);
+        pool.poke();
+
+        uint256 before = usdc.balanceOf(alice) + usdc.balanceOf(bob);
+        vm.warp(block.timestamp + 60);
+        uint256 l = open(alice, true, 10_000 * USDC, 10);
+        uint256 sh = open(bob, false, 10_000 * USDC, 10);
+        setPx(346_430); // +1%
+        vm.warp(block.timestamp + 60);
+        close(bob, sh);
+        close(alice, l);
+        uint256 eq = pool.equity(346.43e18);
+        uint256 pairShareValue = pool.shares(bob) * eq / pool.totalShares();
+        int256 pair = int256(usdc.balanceOf(alice) + usdc.balanceOf(bob) + pairShareValue) - int256(before);
+        emit log_named_int("pair net (USDC units)", pair);
+        emit log_named_uint("pair share value", pairShareValue);
+        assertLt(pair, 0);
+        assertLt(pool.shares(bob) * 10 / pool.totalShares(), 1); // outsiders hold over 90%
+    }
+
+    function test_rebateMustBeBelowHaircut() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.rebateBps = p.winHaircutBps;
+        vm.expectRevert(LaunchPool.RebateNotBelowHaircut.selector);
+        pool.setParams(p, HLPriceGuard.Bounds(25, 25, 20, 150));
+    }
+
+    function test_redeemPaysEquityShare() public {
+        uint256 id = open(alice, true, 10_000 * USDC, 10);
+        setPx(346_500); // -1%
+        vm.warp(block.timestamp + 60);
+        close(alice, id); // pool $1,100, alice holds all shares, worth her $200 rebate... and more
+        assertEq(pool.equity(346.5e18), 1_100 * USDC);
+        uint256 aliceShares = pool.shares(alice);
+        vm.prank(alice);
+        uint256 got = pool.redeem(aliceShares);
+        assertEq(got, 1_100 * USDC); // sole holder: the whole pool, nothing open, no reserve
+        assertEq(pool.poolBalance(), 0);
+    }
+
+    function test_redeemBlockedByDebtAndOpenProfit() public {
+        // bob loses first so the pool has money and bob has shares
+        uint256 b1 = open(bob, true, 10_000 * USDC, 10);
+        setPx(346_500);
+        vm.warp(block.timestamp + 60);
+        close(bob, b1); // pool $1,100
+        // alice opens long; price recovers 2%: alice's open profit is owed by the pool
+        vm.warp(block.timestamp + 60);
+        open(alice, true, 25_000 * USDC, 20); // $500K at 346.5
+        setPx(349_000); // +0.72%: alice up ~$3,608 > pool balance
+        pool.poke();
+        assertEq(pool.equity(349e18), 0);
+        uint256 bobShares = pool.shares(bob);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.RedeemBlocked.selector, 0, 0));
+        pool.redeem(bobShares);
     }
 
     function test_onlyOperator() public {
