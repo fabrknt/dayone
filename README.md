@@ -78,11 +78,11 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 5 (58972d4) | APPROVE | round 4 PoC closed (the attacker redeems $0.20 for a $3 loss); `pendingOpens` accounting checked on every path, including reverts in settle, pause and graduation; donations and rounding dust are never booked, so cannot be redeemed. No new findings |
 | 6 (adbeca4) | CHANGES | keeper and host scripts, no contract change. An expired market-hours calendar aborted the whole tick (settle and liquidate too); a 60 s params cache delayed settlements; install.sh could take over another project's paths, had no rollback and trusted a shared Node. Fixed in 2dbae7c |
 | 6b–6e | CHANGES | install.sh only, narrowing each round: marker written before a healthy start, no rollback on failures after the switch, the live key accepted as input, an incomplete install accepted. 6d also caught that 24269ec's message described a key handoff that was not in the code (corrected in ad079cf). Fixed in 56a22df, 24269ec, ad079cf, 6ef0210 |
-| 6f (6ef0210) | in progress | final pass on install.sh |
+| 6f–6h | CHANGES, CHANGES, APPROVE | install.sh: a linked key file could overwrite another file, an unauthenticated bundle with npm scripts as root, then a newline filename beating the checksum and a hash-then-extract race. Fixed in 7171c44 and e2ee339 (one private bundle copy, hashed and extracted; the script never deletes the upload). 6h: no HIGH left; three medium/low items recorded in docs/testnet.md |
 
 ## Not done
-Moving the testnet keeper to an always-on host with `deploy/cohost/` once round 6 closes (it
-runs on a local machine for now); the win-haircut curve (branch `feat/haircut-curve`, to review
+Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
+on a local machine until then); the win-haircut curve (branch `feat/haircut-curve`, to review
 as round 7); calendars beyond 2026 and other exchanges; audit; mainnet.
 
 `forge test` (30 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.

@@ -27,10 +27,19 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
     `deploy/cohost/scenarios.sh` (container only; it fakes failures).
   - The bundle is read once into a private copy, which must match the SHA-256 bundle.sh printed
     and is the copy extracted; npm runs with `--ignore-scripts`.
-  Run, from a machine with SSH to the host: `./deploy/cohost/bundle.sh` (prints the SHA-256), copy
-  `dist/dayone-keeper.tgz`, `deploy/cohost/install.sh` and the key file over, then
-  `sudo bash install.sh dayone-keeper.tgz SHA256 KEYFILE; shred -u KEYFILE` (upgrades: omit
-  KEYFILE).
+  Run, from a machine with SSH to the host (upload into a directory only the uploader can open):
+  ```
+  ./deploy/cohost/bundle.sh                                   # prints the SHA-256
+  ssh HOST 'install -d -m 700 ~/dayone-upload'
+  scp dist/dayone-keeper.tgz deploy/cohost/install.sh KEYFILE HOST:dayone-upload/
+  ssh HOST 'cd ~/dayone-upload && sudo bash install.sh dayone-keeper.tgz SHA256 KEYFILE; shred -u KEYFILE'
+  ```
+  Upgrades: the same without KEYFILE.
+  - Reviewed by Codex in rounds 6 to 6h (APPROVE at 6h, no HIGH left for a single-tenant host).
+    Recorded, not fixed: the key is read by pathname, so someone who controls the upload path could
+    substitute another valid key (hence the private upload directory); `shred` is best effort on
+    some storage, so use a key that holds nothing of value; the scenarios do not cover the
+    substituted-key case.
 - Rate limit: the public testnet RPC rejected about one tick in six ("Request exceeds defined
   limit") when the keeper made 7 reads a tick. It now reads through Multicall3 (1 call a tick, 2
   with positions) and the hosted keeper ticks every 2 s (`TICK_MS`): no failures in 90 s.
