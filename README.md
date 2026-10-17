@@ -44,7 +44,8 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   The pin is `v0.2.1` (b03e605); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
 - `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
-  `MARKET_HOURS=nyse` it pauses new positions while NYSE is closed (`keeper/campana.mjs`).
+  `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
+  (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN, 2026 calendar with the CSAT shift).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
 
 ## Web UI
@@ -68,6 +69,6 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 
 ## Not done
 Testnet deployment (prepared: `docs/testnet.md`, needs a funded key
-with big blocks on); market-hours calendars other than NYSE (KRX for xyz:SKHX and xyz:SMSN); audit.
+with big blocks on); calendars beyond 2026 and other exchanges; audit.
 
-`forge test` (27 tests); `npm install && ./keeper/e2e.sh` (8 checks).
+`forge test` (27 tests); `npm install && ./keeper/e2e.sh` (10 checks); `node --test keeper/krx.test.mjs`.

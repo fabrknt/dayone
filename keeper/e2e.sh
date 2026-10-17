@@ -69,4 +69,10 @@ check "paused on Saturday" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792418400 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2026-10-19 14:00 UTC = 10:00 EDT
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Monday 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+echo "6. MARKET_HOURS=krx: Monday 23:00 KST pauses new positions, Tuesday 10:00 KST reopens them"
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792458000 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2026-10-20 01:00 UTC = 10:00 KST
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+check "open on Tuesday 10:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
 echo "all ok"

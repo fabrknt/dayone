@@ -8,8 +8,9 @@
 //   2. settle every pending open or close whose settleDelay has passed (from activeIds(), so
 //      the work is bounded by live positions, not by every id ever issued);
 //   3. liquidate every open position below maintenance at the current oracle;
-//   4. with MARKET_HOURS=nyse (operator key only), pause new positions while NYSE is closed:
-//      out of hours there is no independent stock price to check the deployer's oracle against.
+//   4. with MARKET_HOURS=nyse or krx (operator key only), pause new positions while that
+//      exchange is closed: out of hours there is no independent stock price to check the
+//      deployer's oracle against. nyse for US stocks, krx for xyz:SKHX and xyz:SMSN.
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
 import { readFileSync } from "node:fs";
@@ -18,7 +19,8 @@ import {
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { marketStatus } from "./campana.mjs";
+import { marketStatus as nyseStatus } from "./campana.mjs";
+import { marketStatus as krxStatus } from "./krx.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
 const abi = JSON.parse(readFileSync(new URL("../out/LaunchPool.sol/LaunchPool.json", import.meta.url), "utf8")).abi;
@@ -29,7 +31,9 @@ const account = privateKeyToAccount(process.env.PRIVATE_KEY as Hex);
 const pub = createPublicClient({ transport: http(rpc) });
 const wallet = createWalletClient({ account, transport: http(rpc) });
 const once = process.argv.includes("--once");
-const marketHours = process.env.MARKET_HOURS; // "nyse" or unset
+const marketHours = process.env.MARKET_HOURS; // "nyse", "krx" or unset
+const hoursFn = ({ nyse: nyseStatus, krx: krxStatus } as Record<string, (ts: number) => { status: string }>)[marketHours ?? ""];
+if (marketHours && !hoursFn) throw new Error(`MARKET_HOURS must be nyse or krx, got ${marketHours}`);
 // HLPriceGuard.Breach, in order
 const BREACH = ["None", "EmptyBook", "Spread", "MarkOracle", "MidOracle", "RefStale", "RefOracle", "Jump"];
 
@@ -78,9 +82,9 @@ async function tick() {
     if (await send("poke")) lastOracle = oracle;
   }
 
-  if (marketHours === "nyse") {
+  if (hoursFn) {
     const now = Number((await pub.getBlock()).timestamp);
-    const shouldPause = marketStatus(now).status === "CLOSED";
+    const shouldPause = hoursFn(now).status === "CLOSED";
     if ((await read("opensPaused")) !== shouldPause) await send("setOpensPaused", [shouldPause]);
   }
 
