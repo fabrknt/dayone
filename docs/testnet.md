@@ -22,8 +22,8 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
     or a service that does not stay up, restores all three and restarts the previous one.
   - Runs are serialised with a lock. Holding it, the uploaded key is moved to a 0600 copy in
     `/run` and removed; the copy goes on every exit. The installed key itself is refused as input.
-  - Checked in an Amazon Linux 2023 arm64 container with systemd, 12 scenarios (the list is in
-    the Codex round 6 review notes).
+  - Checked in an Amazon Linux 2023 arm64 container with systemd: 12 scenarios in
+    `deploy/cohost/scenarios.sh` (container only; it fakes failures).
   Run, from a machine with SSH to the host: `./deploy/cohost/bundle.sh`, copy
   `dist/dayone-keeper.tgz`, `deploy/cohost/install.sh` and the key file over, then
   `sudo bash install.sh dayone-keeper.tgz KEYFILE` (upgrades: omit KEYFILE).
