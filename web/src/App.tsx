@@ -10,7 +10,7 @@ type Pos = {
 };
 type PoolState = {
   poolBalance: bigint; totalDebt: bigint; totalShares: bigint; longOI: bigint; shortOI: bigint;
-  windowStart: bigint; windowUsed: bigint; capPerWindow: bigint; capWindow: bigint; maxNet: bigint;
+  openUsed: bigint; closeUsed: bigint; capPerWindow: bigint; capWindow: bigint; maxNet: bigint;
   maxLeverage: number; maxNotional: bigint; feeBps: number; settleDelay: bigint; winHaircutBps: number; rebateBps: number;
   opensPaused: boolean; graduated: boolean; equity: bigint;
 };
@@ -32,28 +32,27 @@ function pnl(p: Pos, oracle: bigint): bigint {
 
 async function readPool(pub: PublicClient, pool: Address, oracle: bigint): Promise<PoolState> {
   const r = (fn: string, args: unknown[] = []) => pub.readContract({ address: pool, abi: poolAbi, functionName: fn, args }) as Promise<any>;
-  const [poolBalance, totalDebt, totalShares, longOI, shortOI, window, params, opensPaused, graduated, equity] = await Promise.all([
-    r("poolBalance"), r("totalDebt"), r("totalShares"), r("longOI"), r("shortOI"), r("window"), r("params"),
-    r("opensPaused"), r("graduated"), r("equity", [oracle]),
+  const [poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed, p, opensPaused, graduated, equity] = await Promise.all([
+    r("poolBalance"), r("totalDebt"), r("totalShares"), r("longOI"), r("shortOI"), r("openLaneUsed"), r("closeLaneUsed"),
+    r("getParams"), r("opensPaused"), r("graduated"), r("equity", [oracle]),
   ]);
   return {
-    poolBalance, totalDebt, totalShares, longOI, shortOI,
-    windowStart: window[0], windowUsed: window[1],
-    maxLeverage: params[0], feeBps: params[2], settleDelay: params[3], capWindow: params[4], capPerWindow: params[5],
-    maxNotional: params[6], maxNet: params[8], winHaircutBps: params[9], rebateBps: params[10],
+    poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed,
+    maxLeverage: p.maxLeverage, feeBps: p.feeBps, settleDelay: p.settleDelay, capWindow: p.capWindow,
+    capPerWindow: p.capPerWindow, maxNotional: p.maxNotional, maxNet: p.maxNetNotional,
+    winHaircutBps: p.winHaircutBps, rebateBps: p.rebateBps,
     opensPaused, graduated, equity,
   };
 }
 
 async function readMe(pub: PublicClient, c: Config, address: Address): Promise<Me> {
   const r = (fn: string, args: unknown[] = []) => pub.readContract({ address: c.pool, abi: poolAbi, functionName: fn, args }) as Promise<any>;
-  const [usdc, allowance, shares, nextId] = await Promise.all([
+  const [usdc, allowance, shares, ids] = await Promise.all([
     pub.readContract({ address: c.usdc, abi: usdcAbi, functionName: "balanceOf", args: [address] }),
     pub.readContract({ address: c.usdc, abi: usdcAbi, functionName: "allowance", args: [address, c.pool] }),
     r("shares", [address]),
-    r("nextId"),
+    r("activeIds") as Promise<bigint[]>,
   ]);
-  const ids = Array.from({ length: Number(nextId) - 1 }, (_, i) => BigInt(i + 1));
   const raw = await Promise.all(ids.map((id) => r("positions", [id])));
   const positions = raw
     .map((p: any, i) => ({ id: ids[i], owner: p[0] as Address, long: p[1], leverage: Number(p[2]), margin: p[3], entry: p[4], requestedAt: p[5], closing: p[6] }))
@@ -135,8 +134,6 @@ export default function App() {
 
   const mid = market ? (market.bid + market.ask) / 2n : 0n;
   const net = pool ? (pool.longOI > pool.shortOI ? pool.longOI - pool.shortOI : pool.shortOI - pool.longOI) : 0n;
-  const now = BigInt(Math.floor(Date.now() / 1000));
-  const windowUsed = pool && now < pool.windowStart + pool.capWindow ? pool.windowUsed : 0n;
   const sharePrice = pool && pool.totalShares > 0n ? (pool.equity * 10n ** 18n) / pool.totalShares : 0n;
   const myShareValue = me && pool && pool.totalShares > 0n ? (me.shares * pool.equity) / pool.totalShares : 0n;
   const status = !market ? null : market.guard ? "paused" : pool?.graduated ? "graduated" : pool?.opensPaused ? "closed" : "live";
@@ -213,7 +210,8 @@ export default function App() {
             <span>Long / short open</span><span className="mono">{pool ? `${usd(pool.longOI, 0)} / ${usd(pool.shortOI, 0)}` : "—"}</span>
           </div>
           <Meter label="Net exposure" used={net} cap={pool?.maxNet ?? 0n} />
-          <Meter label="Settled this minute" used={windowUsed} cap={pool?.capPerWindow ?? 0n} />
+          <Meter label="Opens, last minute" used={pool?.openUsed ?? 0n} cap={pool?.capPerWindow ?? 0n} />
+          <Meter label="Closes, last minute" used={pool?.closeUsed ?? 0n} cap={pool?.capPerWindow ?? 0n} />
           <p className="fine">
             The per-minute cap is the main defence: on replay of Papertrade's 10-10 incident it made the price push cost more than it paid.
           </p>

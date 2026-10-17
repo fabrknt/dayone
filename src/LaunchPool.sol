@@ -15,7 +15,7 @@ interface IRefSource {
 }
 
 /// @notice Loss-funded counterparty pool for one HIP-3 perp while its book is thin
-/// (docs/c-launch-pool-design.md). Run by the market's deployer.
+/// (docs/design.md). Run by the market's deployer.
 ///
 /// - Starts empty. Traders' losses and fees fill it. Losers get pool shares worth `rebateBps` of
 ///   their loss; winners give up `winHaircutBps` of their profit. Keeping rebate < haircut is
@@ -23,20 +23,26 @@ interface IRefSource {
 /// - Profits the pool cannot pay yet wait in a FIFO queue, paid from later losses.
 /// - Opens and closes are two-step: request now, settle at the guarded oracle at least
 ///   `settleDelay` seconds later.
-/// - Every settlement counts against a per-minute notional cap (ExposureBudget): on replay,
-///   the cap is what made Papertrade's push unprofitable.
+/// - Opens and closes each have a rolling notional cap (ExposureBudget.Rolling): on replay, the
+///   cap is what made Papertrade's push unprofitable. Separate lanes, so opens cannot use up
+///   the budget that due closes need.
 /// - Any guard breach (bounds, reference, jump latch) makes settlement revert; requests wait.
+/// - Parameter changes take effect `paramsDelay` after they are proposed, and positions keep
+///   the fee and haircut they were opened with.
 contract LaunchPool {
-    using ExposureBudget for ExposureBudget.Window;
+    using ExposureBudget for ExposureBudget.Rolling;
     using HLPriceGuard for HLPriceGuard.JumpLatch;
+
+    uint16 public constant MIN_REDEEM_BUFFER_BPS = 100;
 
     struct Params {
         uint16 maxLeverage;
         uint16 maintenanceBps; // liquidatable when equity < notional * maintenanceBps / 1e4
         uint16 feeBps; // on notional, at open and at close
         uint64 settleDelay; // seconds between request and settlement
-        uint64 capWindow; // seconds
-        uint256 capPerWindow; // notional settled per window, collateral units
+        uint64 capWindow; // seconds; a multiple of ExposureBudget.SLICES
+        uint256 capPerWindow; // notional per rolling window, per lane (opens, closes)
+        uint256 minNotional; // per position: no dust that rounds fees to zero
         uint256 maxNotional; // per position
         uint16 maxJumpBps;
         uint256 maxNetNotional; // |long OI - short OI|: what the pool can lose to one move
@@ -53,6 +59,9 @@ contract LaunchPool {
         uint256 entry; // 1e18; 0 while the open is pending
         uint64 requestedAt; // pending open or close
         bool closing;
+        uint16 feeBps; // fixed at request: the close fee is charged at this rate
+        uint16 haircutBps; // fixed at request
+        uint256 openFee; // paid at request; refunded on cancel, pool income on settle
     }
 
     struct Debt {
@@ -61,18 +70,24 @@ contract LaunchPool {
     }
 
     IERC20 public immutable collateral;
+    uint64 public immutable paramsDelay;
     address public operator;
     HLPriceGuard.Asset public asset;
     HLPriceGuard.Bounds public bounds;
     IRefSource public refSource;
-    Params public params;
+    Params internal _params;
+
+    Params internal _pendingParams;
+    HLPriceGuard.Bounds internal _pendingBounds;
+    IRefSource internal _pendingRef;
+    uint64 public pendingAt; // 0 = nothing pending
 
     bool public opensPaused; // out of trading hours, or by the operator
     bool public graduated; // book is deep enough: no new opens, closes still settle
 
     uint256 public poolBalance; // collateral the pool can pay out from
     uint256 public totalShares;
-    mapping(address => uint256) public shares;
+    mapping(address => uint256) public shares; // shares[address(this)] = locked, never redeemable
     uint256 public minReserve; // never redeemable
 
     Debt[] public debts;
@@ -81,14 +96,20 @@ contract LaunchPool {
 
     mapping(uint256 => Position) public positions;
     uint256 public nextId = 1;
+    uint256[] internal _active; // pending or open positions, for keepers
+    mapping(uint256 => uint256) internal _activeIndex; // id => index + 1
 
     uint256 public longOI;
     uint256 public shortOI;
-    // sum of notional * 1e18 / entry per side: open positions' PnL at price P without a loop
+    uint256 public longMargin;
+    uint256 public shortMargin;
+    // sum of notional * 1e18 / entry per side, rounded so the pool's liability is never
+    // understated (longs up, shorts down): open positions' PnL at price P without a loop
     uint256 public longUnits;
     uint256 public shortUnits;
 
-    ExposureBudget.Window public window;
+    ExposureBudget.Rolling internal _openLane;
+    ExposureBudget.Rolling internal _closeLane;
     HLPriceGuard.JumpLatch public latch;
 
     event OpenRequested(uint256 indexed id, address indexed owner, bool long, uint256 margin, uint16 leverage);
@@ -96,13 +117,16 @@ contract LaunchPool {
     event CloseRequested(uint256 indexed id);
     event Closed(uint256 indexed id, uint256 exit, int256 pnl, uint256 paid, uint256 queued);
     event Liquidated(uint256 indexed id, uint256 price, uint256 lost);
-    event SharesMinted(address indexed to, uint256 lossAmount, uint256 shares);
+    event SharesMinted(address indexed to, uint256 lossAmount, uint256 shares, uint256 locked);
     event Redeemed(address indexed by, uint256 shares, uint256 amount);
+    event ParamsProposed(uint64 effectiveAt);
+    event ParamsApplied();
 
     error NotOperator();
     error NotOwner();
     error OpensClosed();
     error BadRequest();
+    error BadParams();
     error TooEarly();
     error NotLiquidatable();
     error NetExposureExceeded(uint256 net, uint256 limit);
@@ -120,15 +144,39 @@ contract LaunchPool {
         HLPriceGuard.Asset memory asset_,
         HLPriceGuard.Bounds memory bounds_,
         Params memory params_,
-        uint256 minReserve_
+        uint256 minReserve_,
+        uint64 paramsDelay_
     ) {
-        if (params_.rebateBps >= params_.winHaircutBps) revert RebateNotBelowHaircut();
+        _validate(params_);
         collateral = collateral_;
+        paramsDelay = paramsDelay_;
         operator = msg.sender;
         asset = asset_;
         bounds = bounds_;
-        params = params_;
+        _params = params_;
         minReserve = minReserve_;
+    }
+
+    // ---- views ----
+
+    function getParams() external view returns (Params memory) {
+        return _params;
+    }
+
+    function pendingParams() external view returns (Params memory, HLPriceGuard.Bounds memory, IRefSource, uint64) {
+        return (_pendingParams, _pendingBounds, _pendingRef, pendingAt);
+    }
+
+    function activeIds() external view returns (uint256[] memory) {
+        return _active;
+    }
+
+    function openLaneUsed() external view returns (uint256) {
+        return _openLane.used();
+    }
+
+    function closeLaneUsed() external view returns (uint256) {
+        return _closeLane.used();
     }
 
     // ---- operator ----
@@ -141,17 +189,35 @@ contract LaunchPool {
         graduated = true;
     }
 
-    function setRefSource(IRefSource r) external onlyOperator {
-        refSource = r;
+    /// New parameters, bounds and reference source, effective `paramsDelay` from now via
+    /// applyParams(). Traders see them coming and can close first.
+    function proposeParams(Params calldata p, HLPriceGuard.Bounds calldata b, IRefSource r) external onlyOperator {
+        _validate(p);
+        _pendingParams = p;
+        _pendingBounds = b;
+        _pendingRef = r;
+        pendingAt = uint64(block.timestamp) + paramsDelay;
+        emit ParamsProposed(pendingAt);
     }
 
-    function setParams(Params calldata p, HLPriceGuard.Bounds calldata b) external onlyOperator {
-        if (p.rebateBps >= p.winHaircutBps) revert RebateNotBelowHaircut();
-        params = p;
-        bounds = b;
+    /// Anyone, once the delay has passed. Reverts (try later) if the rolling caps still hold
+    /// notional settled under the old cap or window.
+    function applyParams() external {
+        if (pendingAt == 0 || block.timestamp < pendingAt) revert TooEarly();
+        Params memory p = _pendingParams;
+        if (p.capPerWindow != _params.capPerWindow || p.capWindow != _params.capWindow) {
+            _openLane.reconfigure(p.capPerWindow, p.capWindow);
+            _closeLane.reconfigure(p.capPerWindow, p.capWindow);
+        }
+        _params = p;
+        bounds = _pendingBounds;
+        refSource = _pendingRef;
+        pendingAt = 0;
+        emit ParamsApplied();
     }
 
     /// After a real gap trips the jump latch. Only once an independent reference agrees.
+    /// Immediate (an emergency lever); the operator already controls this market's oracle.
     function rearm(uint256 price) external onlyOperator {
         latch.rearm(price);
     }
@@ -159,13 +225,20 @@ contract LaunchPool {
     // ---- traders ----
 
     function requestOpen(bool long, uint256 margin, uint16 leverage) external returns (uint256 id) {
+        Params storage P = _params;
         if (opensPaused || graduated) revert OpensClosed();
-        if (margin == 0 || leverage == 0 || leverage > params.maxLeverage) revert BadRequest();
-        if (margin * leverage > params.maxNotional) revert BadRequest();
+        if (margin == 0 || leverage == 0 || leverage > P.maxLeverage) revert BadRequest();
+        uint256 notional = margin * leverage;
+        if (notional < P.minNotional || notional > P.maxNotional) revert BadRequest();
         // the open fee is collected on top of margin, so notional stays margin * leverage
-        collateral.transferFrom(msg.sender, address(this), margin + _fee(margin * leverage));
+        uint256 openFee = notional * P.feeBps / 10_000;
+        collateral.transferFrom(msg.sender, address(this), margin + openFee);
         id = nextId++;
-        positions[id] = Position(msg.sender, long, leverage, margin, 0, uint64(block.timestamp), false);
+        positions[id] = Position(
+            msg.sender, long, leverage, margin, 0, uint64(block.timestamp), false, P.feeBps, P.winHaircutBps, openFee
+        );
+        _active.push(id);
+        _activeIndex[id] = _active.length;
         emit OpenRequested(id, msg.sender, long, margin, leverage);
     }
 
@@ -174,8 +247,8 @@ contract LaunchPool {
         Position memory p = positions[id];
         if (p.owner != msg.sender) revert NotOwner();
         if (p.entry != 0) revert BadRequest();
-        delete positions[id];
-        collateral.transfer(msg.sender, p.margin + _fee(p.margin * p.leverage));
+        _remove(id);
+        collateral.transfer(msg.sender, p.margin + p.openFee);
     }
 
     function requestClose(uint256 id) external {
@@ -191,19 +264,20 @@ contract LaunchPool {
     function settle(uint256 id) external {
         Position storage p = positions[id];
         if (p.owner == address(0) || (p.entry != 0 && !p.closing)) revert BadRequest();
-        if (block.timestamp < p.requestedAt + params.settleDelay) revert TooEarly();
+        if (block.timestamp < p.requestedAt + _params.settleDelay) revert TooEarly();
         uint256 notional = p.margin * p.leverage;
         uint256 price = _price();
-        window.spend(notional, params.capPerWindow, params.capWindow);
         if (p.entry == 0) {
             if (opensPaused || graduated) revert OpensClosed();
-            _addOI(p.long, notional, price);
+            _openLane.spend(notional, _params.capPerWindow, _params.capWindow);
+            _addOI(p.long, notional, p.margin, price);
             uint256 net = _net();
-            if (net > params.maxNetNotional) revert NetExposureExceeded(net, params.maxNetNotional);
-            _income(_fee(notional));
+            if (net > _params.maxNetNotional) revert NetExposureExceeded(net, _params.maxNetNotional);
+            _income(p.openFee);
             p.entry = price;
             emit Opened(id, price);
         } else {
+            _closeLane.spend(notional, _params.capPerWindow, _params.capWindow);
             _close(id, p, price);
         }
     }
@@ -214,9 +288,9 @@ contract LaunchPool {
         uint256 price = _price();
         uint256 notional = p.margin * p.leverage;
         int256 posEquity = int256(p.margin) + _pnl(p, price);
-        if (posEquity >= int256(notional * params.maintenanceBps / 10_000)) revert NotLiquidatable();
-        delete positions[id];
-        _reduceOI(p.long, notional, p.entry);
+        if (posEquity >= int256(notional * _params.maintenanceBps / 10_000)) revert NotLiquidatable();
+        _remove(id);
+        _reduceOI(p.long, notional, p.margin, p.entry);
         uint256 left = posEquity > 0 ? uint256(posEquity) : 0;
         if (left != 0) collateral.transfer(p.owner, left);
         uint256 lost = p.margin - left;
@@ -239,7 +313,7 @@ contract LaunchPool {
         if (totalDebt != 0 || amountShares == 0 || amountShares > shares[msg.sender]) revert BadRequest();
         uint256 eq = equity(_price());
         amount = amountShares * eq / totalShares;
-        uint256 hold = minReserve + _net() * params.redeemBufferBps / 10_000;
+        uint256 hold = minReserve + _net() * _params.redeemBufferBps / 10_000;
         uint256 available = eq > hold ? eq - hold : 0;
         if (amount == 0 || amount > available) revert RedeemBlocked(amount, available);
         shares[msg.sender] -= amountShares;
@@ -249,53 +323,101 @@ contract LaunchPool {
         emit Redeemed(msg.sender, amountShares, amount);
     }
 
-    /// Pool balance minus what open positions would be paid if closed at `price` (never plus
-    /// what they would lose: unrealized losses are not the pool's yet).
+    /// Pool balance minus an upper bound on what open positions could be paid at `price`.
+    ///
+    /// Per side, the winners' total is at most the side's aggregate PnL plus the side's margin
+    /// (each loser can lose at most its margin before it is liquidated), so open losses are
+    /// never counted as the pool's, and one side's losers never offset the other side's winners.
     function equity(uint256 price) public view returns (uint256) {
-        int256 traders = int256(longUnits * price / 1e18) - int256(longOI) + int256(shortOI)
-            - int256(shortUnits * price / 1e18);
-        if (traders <= 0) return poolBalance;
-        return uint256(traders) >= poolBalance ? 0 : poolBalance - uint256(traders);
+        uint256 longValue = _mulUp(longUnits, price); // what longs' units are worth, rounded up
+        uint256 shortValue = shortUnits * price / 1e18; // rounded down: shorts gain when it is low
+        uint256 longOwed = longValue + longMargin > longOI ? longValue + longMargin - longOI : 0;
+        uint256 shortOwed = shortOI + shortMargin > shortValue ? shortOI + shortMargin - shortValue : 0;
+        uint256 owed = longOwed + shortOwed;
+        return owed >= poolBalance ? 0 : poolBalance - owed;
+    }
+
+    /// The pool's value with open positions marked at `price`, losses included (exact up to
+    /// unit rounding of a few atoms per position). Used to price new shares: valuing the pool high means fewer shares, so a
+    /// mint can never dilute existing holders, whereas equity() is deliberately low (for
+    /// redemption) and would hand out cheap shares while the other side of a trade is open.
+    function fairEquity(uint256 price) public view returns (uint256) {
+        uint256 longValue = longUnits * price / 1e18;
+        uint256 shortValue = _mulUp(shortUnits, price);
+        // traders' net PnL = (longValue - longOI) + (shortOI - shortValue)
+        int256 tradersPnl = int256(longValue) - int256(longOI) + int256(shortOI) - int256(shortValue);
+        int256 v = int256(poolBalance) - tradersPnl;
+        return v > 0 ? uint256(v) : 0;
     }
 
     // ---- internals ----
+
+    function _validate(Params memory p) internal pure {
+        if (p.rebateBps >= p.winHaircutBps) revert RebateNotBelowHaircut();
+        if (p.redeemBufferBps < MIN_REDEEM_BUFFER_BPS) revert BadParams();
+        if (p.minNotional == 0 || p.minNotional > p.maxNotional) revert BadParams();
+        if (p.capWindow < ExposureBudget.SLICES || p.capWindow % ExposureBudget.SLICES != 0) revert BadParams();
+        if (p.maxLeverage == 0 || p.winHaircutBps > 10_000 || p.feeBps > 1_000) revert BadParams();
+    }
 
     function _price() internal returns (uint256 price) {
         HLPriceGuard.Ref memory r;
         if (address(refSource) != address(0)) r = refSource.ref();
         HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
         (HLPriceGuard.Breach reason, uint256 observed, uint256 limit) = HLPriceGuard.check(q, bounds, r);
-        if (reason == HLPriceGuard.Breach.None) (reason, observed, limit) = latch.observe(q.oracle, params.maxJumpBps);
+        if (reason == HLPriceGuard.Breach.None) {
+            (reason, observed, limit) = latch.observe(q.oracle, _params.maxJumpBps);
+        }
         if (reason != HLPriceGuard.Breach.None) revert Breach(reason, observed, limit);
         return q.oracle;
     }
 
-    function _addOI(bool long, uint256 notional, uint256 entry) internal {
+    function _remove(uint256 id) internal {
+        uint256 i = _activeIndex[id];
+        uint256 last = _active[_active.length - 1];
+        _active[i - 1] = last;
+        _activeIndex[last] = i;
+        _active.pop();
+        delete _activeIndex[id];
+        delete positions[id];
+    }
+
+    function _mulUp(uint256 a, uint256 b) internal pure returns (uint256) {
+        return (a * b + 1e18 - 1) / 1e18;
+    }
+
+    function _units(bool long, uint256 notional, uint256 entry) internal pure returns (uint256) {
+        return long ? (notional * 1e18 + entry - 1) / entry : notional * 1e18 / entry;
+    }
+
+    function _addOI(bool long, uint256 notional, uint256 margin, uint256 entry) internal {
+        uint256 u = _units(long, notional, entry);
         if (long) {
             longOI += notional;
-            longUnits += notional * 1e18 / entry;
+            longMargin += margin;
+            longUnits += u;
         } else {
             shortOI += notional;
-            shortUnits += notional * 1e18 / entry;
+            shortMargin += margin;
+            shortUnits += u;
         }
     }
 
-    function _reduceOI(bool long, uint256 notional, uint256 entry) internal {
+    function _reduceOI(bool long, uint256 notional, uint256 margin, uint256 entry) internal {
+        uint256 u = _units(long, notional, entry);
         if (long) {
             longOI -= notional;
-            longUnits -= notional * 1e18 / entry;
+            longMargin -= margin;
+            longUnits -= u;
         } else {
             shortOI -= notional;
-            shortUnits -= notional * 1e18 / entry;
+            shortMargin -= margin;
+            shortUnits -= u;
         }
     }
 
     function _net() internal view returns (uint256) {
         return longOI > shortOI ? longOI - shortOI : shortOI - longOI;
-    }
-
-    function _fee(uint256 notional) internal view returns (uint256) {
-        return notional * params.feeBps / 10_000;
     }
 
     function _pnl(Position memory p, uint256 price) internal pure returns (int256) {
@@ -306,16 +428,16 @@ contract LaunchPool {
 
     function _close(uint256 id, Position storage ps, uint256 price) internal {
         Position memory p = ps;
-        delete positions[id];
+        _remove(id);
         uint256 notional = p.margin * p.leverage;
-        _reduceOI(p.long, notional, p.entry);
-        uint256 fee = _fee(notional);
+        _reduceOI(p.long, notional, p.margin, p.entry);
+        uint256 fee = notional * p.feeBps / 10_000;
         int256 pnl = _pnl(p, price) - int256(fee);
         uint256 paid;
         uint256 queued;
         if (pnl >= 0) {
             // net of the close fee and the win haircut, both of which stay in the pool
-            uint256 profit = uint256(pnl) - uint256(pnl) * params.winHaircutBps / 10_000;
+            uint256 profit = uint256(pnl) - uint256(pnl) * p.haircutBps / 10_000;
             paid = profit <= poolBalance ? profit : poolBalance;
             poolBalance -= paid;
             queued = profit - paid;
@@ -348,16 +470,30 @@ contract LaunchPool {
         poolBalance += amount;
     }
 
-    /// Shares worth `rebateBps` of the loss at the pool's current equity per share.
-    /// The first shares are minted 1:1 with collateral units.
+    /// Shares worth `rebateBps` of the loss at the pool's fair value per share.
+    ///
+    /// The first mint also creates locked shares (held by this contract, never redeemable) for
+    /// the rest of the value, so the first loser's shares are worth the rebate and no more.
     function _mintShares(address to, uint256 loss, uint256 price) internal {
-        uint256 value = loss * params.rebateBps / 10_000;
+        uint256 value = loss * _params.rebateBps / 10_000;
         if (value == 0) return;
-        uint256 eq = equity(price);
-        // value is already inside eq (the loss was just added), so price shares off eq - value
-        uint256 s_ = totalShares == 0 || eq <= value ? value : value * totalShares / (eq - value);
+        uint256 eq = fairEquity(price);
+        uint256 s_;
+        uint256 locked;
+        if (totalShares == 0) {
+            // 1 share = 1 collateral unit at the start
+            s_ = value;
+            locked = eq > value ? eq - value : 0;
+        } else if (eq > value) {
+            // value is already inside eq (the loss was just added), so price shares off eq - value
+            s_ = value * totalShares / (eq - value);
+        } else {
+            // existing shares are worth nothing right now; this mint is worth at most `value`
+            s_ = value;
+        }
         shares[to] += s_;
-        totalShares += s_;
-        emit SharesMinted(to, loss, s_);
+        if (locked != 0) shares[address(this)] += locked;
+        totalShares += s_ + locked;
+        emit SharesMinted(to, loss, s_, locked);
     }
 }

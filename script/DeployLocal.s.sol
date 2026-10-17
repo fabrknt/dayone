@@ -24,6 +24,7 @@ contract DeployLocal is Script {
                 settleDelay: 3,
                 capWindow: 60,
                 capPerWindow: 1_000_000 * usdc,
+                minNotional: 100 * usdc,
                 maxNotional: 500_000 * usdc,
                 maxJumpBps: 200,
                 maxNetNotional: 1_500_000 * usdc,
@@ -31,7 +32,8 @@ contract DeployLocal is Script {
                 rebateBps: 2000,
                 redeemBufferBps: 1000
             }),
-            0
+            0,
+            60 // paramsDelay
         );
         vm.stopBroadcast();
         vm.writeFile("keeper/.local.json", string.concat(

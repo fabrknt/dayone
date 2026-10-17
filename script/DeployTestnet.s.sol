@@ -34,6 +34,7 @@ contract DeployTestnet is Script {
                 settleDelay: 3,
                 capWindow: 60,
                 capPerWindow: 30_000 * usdc, // xyz:TSLA's mainnet safe cap, measure/safe_caps.py 10-17
+                minNotional: 100 * usdc,
                 maxNotional: 30_000 * usdc,
                 maxJumpBps: 200,
                 maxNetNotional: 100_000 * usdc,
@@ -41,7 +42,8 @@ contract DeployTestnet is Script {
                 rebateBps: 2000,
                 redeemBufferBps: 1000
             }),
-            0
+            0,
+            1 days // paramsDelay
         );
         vm.stopBroadcast();
         console.log("usdc", address(token));

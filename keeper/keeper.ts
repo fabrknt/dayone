@@ -5,7 +5,8 @@
 // Every tick (1 s):
 //   1. read the oracle (0x807); if it changed, call poke() so the latch compares against a
 //      recent price (its anchor only moves in a transaction that succeeds);
-//   2. settle every pending open or close whose settleDelay has passed;
+//   2. settle every pending open or close whose settleDelay has passed (from activeIds(), so
+//      the work is bounded by live positions, not by every id ever issued);
 //   3. liquidate every open position below maintenance at the current oracle;
 //   4. with MARKET_HOURS=nyse (operator key only), pause new positions while NYSE is closed:
 //      out of hours there is no independent stock price to check the deployer's oracle against.
@@ -83,11 +84,12 @@ async function tick() {
     if ((await read("opensPaused")) !== shouldPause) await send("setOpensPaused", [shouldPause]);
   }
 
-  const p = await read("params");
-  const [maintenanceBps, settleDelay] = [BigInt(p[1]), BigInt(p[3])];
+  const p = await read("getParams");
+  const [maintenanceBps, settleDelay] = [BigInt(p.maintenanceBps), BigInt(p.settleDelay)];
   const now = (await pub.getBlock()).timestamp;
-  const nextId: bigint = await read("nextId");
-  for (let id = 1n; id < nextId; id++) {
+  // only pending and open positions: closed and cancelled ids leave this list on chain
+  const ids: bigint[] = await read("activeIds");
+  for (const id of ids) {
     const [owner, long, leverage, margin, entry, requestedAt, closing] = await read("positions", [id]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {

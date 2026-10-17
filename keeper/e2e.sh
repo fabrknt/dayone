@@ -27,8 +27,8 @@ px() {
 }
 later() { cast rpc --rpc-url $RPC evm_increaseTime $1 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null; }
 keeper() { RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | sed 's/^[^ ]* /  keeper: /'; }
-entry() { cast call --rpc-url $RPC $POOL "positions(uint256)(address,bool,uint16,uint256,uint256,uint64,bool)" $1 | sed -n 5p | cut -d' ' -f1; }
-owner() { cast call --rpc-url $RPC $POOL "positions(uint256)(address,bool,uint16,uint256,uint256,uint64,bool)" $1 | sed -n 1p; }
+entry() { cast call --rpc-url $RPC $POOL "positions(uint256)(address,bool,uint16,uint256,uint256,uint64,bool,uint16,uint16,uint256)" $1 | sed -n 5p | cut -d' ' -f1; }
+owner() { cast call --rpc-url $RPC $POOL "positions(uint256)(address,bool,uint16,uint256,uint256,uint64,bool,uint16,uint16,uint256)" $1 | sed -n 1p; }
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, want $3"; exit 1; fi; }
 
 px 350000

@@ -45,7 +45,8 @@ contract LaunchPoolTest is Test {
             HLPriceGuard.Asset({dex: 1, index: 1, szDecimals: 3}),
             HLPriceGuard.Bounds({maxMarkOracleBps: 25, maxMidOracleBps: 25, maxSpreadBps: 20, maxRefOracleBps: 150}),
             defaultParams(),
-            0
+            0,
+            1 days
         );
         for (uint256 i; i < 2; i++) {
             address u = i == 0 ? alice : bob;
@@ -63,6 +64,7 @@ contract LaunchPoolTest is Test {
             settleDelay: 3,
             capWindow: 60,
             capPerWindow: 1_000_000 * USDC,
+            minNotional: 100 * USDC,
             maxNotional: 500_000 * USDC,
             maxJumpBps: 200,
             maxNetNotional: 1_500_000 * USDC,
@@ -100,7 +102,7 @@ contract LaunchPoolTest is Test {
         pool.settle(id);
         vm.warp(block.timestamp + 3);
         pool.settle(id);
-        (,,,, uint256 entry,,) = pool.positions(id);
+        (,,,, uint256 entry,,,,,) = pool.positions(id);
         assertEq(entry, 350e18);
     }
 
@@ -144,8 +146,8 @@ contract LaunchPoolTest is Test {
             abi.encodeWithSelector(ExposureBudget.BudgetExceeded.selector, 1_000_000 * USDC, 10_000 * USDC, 1_000_000 * USDC)
         );
         pool.settle(id);
-        vm.warp(block.timestamp + 60);
-        pool.settle(id); // next window
+        vm.warp(block.timestamp + 70); // rolling: the burst leaves the window within 60-70 s
+        pool.settle(id);
     }
 
     /// A push that moves the book but not the oracle trips the mid-oracle bound and the close
@@ -196,7 +198,9 @@ contract LaunchPoolTest is Test {
 
     function test_referenceDisagreementBlocks() public {
         MockRef r = new MockRef();
-        pool.setRefSource(r);
+        pool.proposeParams(defaultParams(), HLPriceGuard.Bounds(25, 25, 20, 150), r);
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
         r.set(360e18, block.timestamp, 10); // 278 bp above the oracle
         vm.prank(alice);
         uint256 id = pool.requestOpen(true, 1_000 * USDC, 10);
@@ -291,20 +295,21 @@ contract LaunchPoolTest is Test {
         LaunchPool.Params memory p = defaultParams();
         p.rebateBps = p.winHaircutBps;
         vm.expectRevert(LaunchPool.RebateNotBelowHaircut.selector);
-        pool.setParams(p, HLPriceGuard.Bounds(25, 25, 20, 150));
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
     }
 
     function test_redeemPaysEquityShare() public {
         uint256 id = open(alice, true, 10_000 * USDC, 10);
         setPx(346_500); // -1%
         vm.warp(block.timestamp + 60);
-        close(alice, id); // pool $1,100, alice holds all shares, worth her $200 rebate... and more
+        close(alice, id); // pool $1,100; alice's shares are worth her $200 rebate, the rest is locked
         assertEq(pool.equity(346.5e18), 1_100 * USDC);
+        assertEq(pool.shares(address(pool)), 900 * USDC);
         uint256 aliceShares = pool.shares(alice);
         vm.prank(alice);
         uint256 got = pool.redeem(aliceShares);
-        assertEq(got, 1_100 * USDC); // sole holder: the whole pool, nothing open, no reserve
-        assertEq(pool.poolBalance(), 0);
+        assertEq(got, 200 * USDC);
+        assertEq(pool.poolBalance(), 900 * USDC);
     }
 
     function test_redeemBlockedByDebtAndOpenProfit() public {
@@ -323,6 +328,95 @@ contract LaunchPoolTest is Test {
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(LaunchPool.RedeemBlocked.selector, 0, 0));
         pool.redeem(bobShares);
+    }
+
+    // ---- regressions for Codex round 1 ----
+
+    /// R1-F1: an open loser on one side must not offset an open winner on the other.
+    function test_r1_equityDoesNotNetOppositeSides() public {
+        open(alice, true, 10_000 * USDC, 10);
+        open(bob, false, 10_000 * USDC, 10);
+        setPx(353_500); // long +$1,000, short -$1,000: net zero, but the long is owed $1,000
+        // pool holds $100 of open fees; owed = long ($1,000 profit + $10,000 margin) + short (0)
+        assertEq(pool.equity(353.5e18), 0);
+        assertApproxEqAbs(pool.fairEquity(353.5e18), 100 * USDC, 1_000); // units rounding: < $0.001
+    }
+
+    /// R1-F2: the first loser's shares are worth the rebate, not the whole pool.
+    function test_r1_firstLoserSharesWorthOnlyRebate() public {
+        uint256 a = open(alice, true, 10_000 * USDC, 10);
+        setPx(346_500);
+        vm.warp(block.timestamp + 70);
+        close(alice, a); // alice loses $1,000: shares worth $200
+        pool.poke();
+        vm.warp(block.timestamp + 70);
+        uint256 b = open(bob, true, 10_000 * USDC, 10);
+        setPx(343_035);
+        vm.warp(block.timestamp + 70);
+        close(bob, b); // bob loses $1,000 too
+        uint256 aliceShares = pool.shares(alice);
+        vm.prank(alice);
+        uint256 got = pool.redeem(aliceShares);
+        // her $200 plus her pro-rata part of later income, nowhere near bob's $1,000
+        assertLt(got, 400 * USDC);
+        assertGt(got, 200 * USDC);
+    }
+
+    /// R1-F3: a fee change can't reach a pending request, and only lands after the delay.
+    function test_r1_feeFixedAtRequestAndParamsDelayed() public {
+        vm.prank(alice);
+        uint256 id = pool.requestOpen(true, 1_000 * USDC, 10); // $5 fee at 5 bp
+        LaunchPool.Params memory p = defaultParams();
+        p.feeBps = 1_000;
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.expectRevert(LaunchPool.TooEarly.selector);
+        pool.applyParams();
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+        vm.prank(alice);
+        pool.cancelOpen(id);
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC); // refund = what she paid, not 10%
+    }
+
+    /// R1-F4: opens filling their lane do not block a due close.
+    function test_r1_closeHasItsOwnLane() public {
+        uint256 a = open(alice, true, 10_000 * USDC, 10);
+        vm.warp(block.timestamp + 70);
+        open(bob, true, 25_000 * USDC, 20);
+        open(bob, false, 25_000 * USDC, 20); // open lane now full ($1M)
+        vm.prank(alice);
+        pool.requestClose(a);
+        vm.warp(block.timestamp + 3);
+        pool.settle(a); // the close lane is empty
+        assertEq(pool.openLaneUsed(), 1_000_000 * USDC);
+        assertEq(pool.closeLaneUsed(), 100_000 * USDC);
+    }
+
+    /// R1-F5: a zero redemption buffer is refused.
+    function test_r1_minimumRedeemBuffer() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.redeemBufferBps = 0;
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+    }
+
+    /// R1-F6: dust is refused, and cancelled or closed ids leave the active list.
+    function test_r1_activeListAndMinNotional() public {
+        vm.startPrank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.requestOpen(true, 9 * USDC, 10); // $90 < $100 minimum
+        uint256 a = pool.requestOpen(true, 1_000 * USDC, 10);
+        uint256 b = pool.requestOpen(true, 1_000 * USDC, 10);
+        assertEq(pool.activeIds().length, 2);
+        pool.cancelOpen(a);
+        vm.stopPrank();
+        uint256[] memory ids = pool.activeIds();
+        assertEq(ids.length, 1);
+        assertEq(ids[0], b);
+        vm.warp(block.timestamp + 3);
+        pool.settle(b);
+        close(alice, b);
+        assertEq(pool.activeIds().length, 0);
     }
 
     function test_onlyOperator() public {
