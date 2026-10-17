@@ -62,4 +62,11 @@ LOG=$(mktemp)
 keeper | tee $LOG
 grep -q "Breach Jump" $LOG && echo "ok   poke refused with a Jump breach" || { echo "FAIL no Jump breach"; exit 1; }
 check "position 2 not liquidated at the bad price" "$(entry 2)" 319658000000000000000
+echo "5. MARKET_HOURS=nyse: Saturday pauses new positions, Monday 10:00 ET reopens them"
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792260000 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Sat 2026-10-17 18:00 UTC
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+check "paused on Saturday" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792418400 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2026-10-19 14:00 UTC = 10:00 EDT
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+check "open on Monday 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
 echo "all ok"

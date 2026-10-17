@@ -19,10 +19,11 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
 - `src/LaunchPool.sol`, `test/LaunchPool.t.sol`
 - `lib/hl-price-guard`: price reading and caps. Changes to it are made in that repo.
 
-- `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates.
+- `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
+  `MARKET_HOURS=nyse` it pauses new positions while NYSE is closed (`keeper/campana.mjs`).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
 
 ## Not done
-Testnet deployment (prepared: docs/testnet.md, needs a funded key with big blocks on), the operator's market-hours switch in the keeper, audit.
+Testnet deployment (prepared: docs/testnet.md, needs a funded key with big blocks on), market-hours calendars other than NYSE (KRX for xyz:SKHX and xyz:SMSN), audit.
 
 `forge test` (17 tests); `npm install && ./keeper/e2e.sh`.

@@ -6,7 +6,9 @@
 //   1. read the oracle (0x807); if it changed, call poke() so the latch compares against a
 //      recent price (its anchor only moves in a transaction that succeeds);
 //   2. settle every pending open or close whose settleDelay has passed;
-//   3. liquidate every open position below maintenance at the current oracle.
+//   3. liquidate every open position below maintenance at the current oracle;
+//   4. with MARKET_HOURS=nyse (operator key only), pause new positions while NYSE is closed:
+//      out of hours there is no independent stock price to check the deployer's oracle against.
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
 import { readFileSync } from "node:fs";
@@ -15,6 +17,7 @@ import {
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { marketStatus } from "./campana.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
 const abi = JSON.parse(readFileSync(new URL("../out/LaunchPool.sol/LaunchPool.json", import.meta.url), "utf8")).abi;
@@ -25,6 +28,7 @@ const account = privateKeyToAccount(process.env.PRIVATE_KEY as Hex);
 const pub = createPublicClient({ transport: http(rpc) });
 const wallet = createWalletClient({ account, transport: http(rpc) });
 const once = process.argv.includes("--once");
+const marketHours = process.env.MARKET_HOURS; // "nyse" or unset
 // HLPriceGuard.Breach, in order
 const BREACH = ["None", "EmptyBook", "Spread", "MarkOracle", "MidOracle", "RefStale", "RefOracle", "Jump"];
 
@@ -71,6 +75,12 @@ async function tick() {
   const oracle = (px as bigint) * 10n ** (12n + BigInt(szDecimals));
   if (oracle !== lastOracle) {
     if (await send("poke")) lastOracle = oracle;
+  }
+
+  if (marketHours === "nyse") {
+    const now = Number((await pub.getBlock()).timestamp);
+    const shouldPause = marketStatus(now).status === "CLOSED";
+    if ((await read("opensPaused")) !== shouldPause) await send("setOpensPaused", [shouldPause]);
   }
 
   const p = await read("params");
