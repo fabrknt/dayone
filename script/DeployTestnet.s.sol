@@ -39,7 +39,10 @@ contract DeployTestnet is Script {
                 maxJumpBps: 200,
                 maxNetNotional: 100_000 * usdc,
                 winHaircutBps: 3000,
-                rebateBps: 2000,
+                winHaircutMinBps: 1500,
+                haircutFromMoveBps: 25,
+                haircutToMoveBps: 100,
+                rebateBps: 1200,
                 redeemBufferBps: 1000
             }),
             0,

@@ -11,7 +11,7 @@ type Pos = {
 type PoolState = {
   poolBalance: bigint; totalDebt: bigint; totalShares: bigint; longOI: bigint; shortOI: bigint;
   openUsed: bigint; closeUsed: bigint; capPerWindow: bigint; capWindow: bigint; maxNet: bigint;
-  maxLeverage: number; maxNotional: bigint; feeBps: number; settleDelay: bigint; winHaircutBps: number; rebateBps: number;
+  maxLeverage: number; maxNotional: bigint; feeBps: number; settleDelay: bigint; winHaircutBps: number; winHaircutMinBps: number; haircutFromMoveBps: number; haircutToMoveBps: number; rebateBps: number;
   opensPaused: boolean; graduated: boolean; equity: bigint;
 };
 type Me = { address: Address; usdc: bigint; allowance: bigint; shares: bigint; positions: Pos[] };
@@ -40,7 +40,7 @@ async function readPool(pub: PublicClient, pool: Address, oracle: bigint): Promi
     poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed,
     maxLeverage: p.maxLeverage, feeBps: p.feeBps, settleDelay: p.settleDelay, capWindow: p.capWindow,
     capPerWindow: p.capPerWindow, maxNotional: p.maxNotional, maxNet: p.maxNetNotional,
-    winHaircutBps: p.winHaircutBps, rebateBps: p.rebateBps,
+    winHaircutBps: p.winHaircutBps, winHaircutMinBps: p.winHaircutMinBps, haircutFromMoveBps: p.haircutFromMoveBps, haircutToMoveBps: p.haircutToMoveBps, rebateBps: p.rebateBps,
     opensPaused, graduated, equity,
   };
 }
@@ -194,7 +194,7 @@ export default function App() {
               </button>
               <p className="fine">
                 Two steps: you request now, and it settles at the oracle once {String(pool?.settleDelay ?? 3n)} s have passed.
-                Winners keep {pool ? 100 - pool.winHaircutBps / 100 : 70}% of profit; losers get pool shares worth {pool ? pool.rebateBps / 100 : 20}% of their loss.
+                Winners keep {pool ? 100 - pool.winHaircutBps / 100 : 70}% of profit on small moves, rising to {pool ? 100 - pool.winHaircutMinBps / 100 : 85}% once the price has moved {pool ? pool.haircutToMoveBps / 100 : 1}%; losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of their loss.
               </p>
             </>
           )}
@@ -260,7 +260,7 @@ export default function App() {
           <li><b>New listings have thin books.</b> Day One takes the other side of your trade while the HL book fills up, and steps back once it is deep enough.</li>
           <li><b>Fills at the oracle, two steps.</b> You request, and it fills at the next price once {String(pool?.settleDelay ?? 3n)} s have passed, so nobody can trade on a price they already know.</li>
           <li><b>It stops rather than fill at a bad price.</b> If the oracle jumps, disagrees with HL's book or with an outside price, every fill and liquidation waits.</li>
-          <li><b>Losses fund the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 20}% of what they lost; winners give {pool ? pool.winHaircutBps / 100 : 30}% of profit to the pool. Profit the pool can't pay yet is queued and paid from later losses.</li>
+          <li><b>Losses fund the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of what they lost; winners give the pool {pool ? pool.winHaircutBps / 100 : 30}% of profit on small moves, falling to {pool ? pool.winHaircutMinBps / 100 : 15}% on moves of {pool ? pool.haircutToMoveBps / 100 : 1}% or more. Profit the pool can't pay yet is queued and paid from later losses.</li>
         </ol>
       </section>
 

@@ -69,7 +69,10 @@ contract LaunchPoolTest is Test {
             maxJumpBps: 200,
             maxNetNotional: 1_500_000 * USDC,
             winHaircutBps: 3000,
-            rebateBps: 2000,
+            winHaircutMinBps: 1500,
+            haircutFromMoveBps: 25,
+            haircutToMoveBps: 100,
+            rebateBps: 1200,
             redeemBufferBps: 1000
         });
     }
@@ -112,27 +115,27 @@ contract LaunchPoolTest is Test {
         vm.warp(block.timestamp + 60);
         close(alice, id); // loss $1,000 + $50 close fee
         assertEq(pool.poolBalance(), 1_100 * USDC); // both fees + loss
-        assertEq(pool.shares(alice), 200 * USDC); // 20% of the $1,000 loss; fees do not count
+        assertEq(pool.shares(alice), 120 * USDC); // 12% of the $1,000 loss; fees do not count
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 1_100 * USDC);
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
     function test_unpaidProfitQueuesAndIsPaidFromLaterLosses() public {
         uint256 id = open(alice, true, 10_000 * USDC, 10);
-        setPx(353_500); // +1%: ($1,000 - $50 close fee) * 70% = $665 owed; the pool holds $50
+        setPx(353_500); // +1%, at the curve's floor: ($1,000 - $50 close fee) * 85% = $807.50 owed; the pool holds $50
         vm.warp(block.timestamp + 60);
         close(alice, id);
-        assertEq(pool.totalDebt(), 615 * USDC);
+        assertEq(pool.totalDebt(), 757.5e6);
         assertEq(pool.poolBalance(), 0);
 
         vm.warp(block.timestamp + 60);
         uint256 id2 = open(bob, true, 10_000 * USDC, 10); // bob's $50 open fee goes to alice first
-        assertEq(pool.totalDebt(), 565 * USDC);
+        assertEq(pool.totalDebt(), 707.5e6);
         setPx(350_000); // bob loses 1%
         vm.warp(block.timestamp + 60);
         close(bob, id2);
         assertEq(pool.totalDebt(), 0);
-        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC + 615 * USDC); // +665 - 50 open fee
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC + 757.5e6); // +807.50 - 50 open fee
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance()); // nothing open: tokens == books
     }
 
@@ -184,7 +187,7 @@ contract LaunchPoolTest is Test {
         pool.liquidate(id);
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 100 * USDC - 6_000 * USDC);
         assertEq(pool.poolBalance(), 6_100 * USDC);
-        assertEq(pool.shares(alice), 1_200 * USDC); // 20% of $6,000
+        assertEq(pool.shares(alice), 720 * USDC); // 12% of $6,000
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
@@ -262,7 +265,8 @@ contract LaunchPoolTest is Test {
 
     /// Two own accounts, one long and one short of the same size: one loses what the other wins.
     /// The rebate dilutes the other shareholders, while the haircut and fees go to all of them.
-    /// With rebate (20%) below the haircut (30%) and outsiders holding most shares, the pair loses.
+    /// With the rebate (12%) below the haircut (30% falling to 15% at a 1% move) and outsiders
+    /// holding most shares, the pair loses. This pair moves 1%, so it pays the curve's floor.
     function test_washTradingLoses() public {
         address carol = address(0xCA201);
         usdc.mint(carol, 100_000 * USDC);
@@ -293,7 +297,7 @@ contract LaunchPoolTest is Test {
 
     function test_rebateMustBeBelowHaircut() public {
         LaunchPool.Params memory p = defaultParams();
-        p.rebateBps = p.winHaircutBps;
+        p.rebateBps = p.winHaircutMinBps; // below the top of the curve, but not below its floor
         vm.expectRevert(LaunchPool.RebateNotBelowHaircut.selector);
         pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
     }
@@ -302,14 +306,14 @@ contract LaunchPoolTest is Test {
         uint256 id = open(alice, true, 10_000 * USDC, 10);
         setPx(346_500); // -1%
         vm.warp(block.timestamp + 60);
-        close(alice, id); // pool $1,100; alice's shares are worth her $200 rebate, the rest is locked
+        close(alice, id); // pool $1,100; alice's shares are worth her $120 rebate, the rest is locked
         assertEq(pool.equity(346.5e18), 1_100 * USDC);
-        assertEq(pool.shares(address(pool)), 900 * USDC);
+        assertEq(pool.shares(address(pool)), 980 * USDC);
         uint256 aliceShares = pool.shares(alice);
         vm.prank(alice);
         uint256 got = pool.redeem(aliceShares);
-        assertEq(got, 200 * USDC);
-        assertEq(pool.poolBalance(), 900 * USDC);
+        assertEq(got, 120 * USDC);
+        assertEq(pool.poolBalance(), 980 * USDC);
     }
 
     function test_redeemBlockedByDebtAndOpenProfit() public {
@@ -535,7 +539,7 @@ contract LaunchPoolTest is Test {
         emit log_named_uint("share valuation", pool.shareValuation());
         emit log_named_uint("alice shares", pool.shares(alice));
         emit log_named_uint("locked shares", pool.shares(address(pool)));
-        assertEq(pool.shares(alice), 200 * USDC);
+        assertEq(pool.shares(alice), 120 * USDC); // 12% of $1,000
         assertGt(pool.shares(address(pool)), 0);
         assertEq(pool.totalShares(), pool.shareValuation());
     }
@@ -590,5 +594,114 @@ contract LaunchPoolTest is Test {
         pool.cancelOpen(id);
         assertEq(pool.shareValuation(), v0);
         assertEq(pool.pendingOpens(), 0);
+    }
+
+    // ---- the win haircut falls with the size of the move ----
+
+    /// 30% up to a 0.25% move, 15% from 1%, linear in between; measured on the price, so
+    /// leverage does not change the rate.
+    function test_haircutCurve() public {
+        uint256 a = open(alice, true, 1_000 * USDC, 1);
+        uint256 b = open(bob, true, 1_000 * USDC, 20);
+        assertEq(pool.haircutAt(a, 350.35e18), 3000); // +10 bp
+        assertEq(pool.haircutAt(a, 352.1875e18), 2250); // +62.5 bp: halfway
+        assertEq(pool.haircutAt(a, 353.5e18), 1500); // +100 bp
+        assertEq(pool.haircutAt(a, 357e18), 1500); // +200 bp: the floor
+        assertEq(pool.haircutAt(a, 347.8125e18), 2250); // the same for a move down
+        assertEq(pool.haircutAt(b, 352.1875e18), 2250); // 20x pays what 1x pays
+    }
+
+    /// The curve is part of the params: each position keeps the one in force at its request.
+    function test_haircutCurveFixedAtRequest() public {
+        uint256 id = open(alice, true, 10_000 * USDC, 10);
+        LaunchPool.Params memory p = defaultParams();
+        p.winHaircutBps = 2000;
+        p.winHaircutMinBps = 1300;
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+        assertEq(pool.haircutAt(id, 357e18), 1500); // still the old floor
+        assertEq(pool.haircutAt(id, 350.35e18), 3000); // and the old top
+        uint256 id2 = open(bob, true, 10_000 * USDC, 10);
+        assertEq(pool.haircutAt(id2, 357e18), 1300);
+    }
+
+    function test_haircutCurveValidation() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.winHaircutMinBps = p.winHaircutBps + 1; // a curve that rises
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        p = defaultParams();
+        p.haircutToMoveBps = p.haircutFromMoveBps;
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+    }
+
+    /// Washing aimed at the floor: the rebate set one bp under the floor, a 4% move so the winning
+    /// leg pays only the floor, high leverage. The pair still loses.
+    function test_washAtCurveFloorLoses() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.rebateBps = p.winHaircutMinBps - 1; // 14.99% against a 15% floor
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+
+        address carol = address(0xCA201);
+        usdc.mint(carol, 100_000 * USDC);
+        vm.prank(carol);
+        usdc.approve(address(pool), type(uint256).max);
+        uint256 c = open(carol, true, 25_000 * USDC, 20); // outsiders own most shares first
+        setPx(343_000);
+        vm.warp(block.timestamp + 60);
+        close(carol, c);
+        pool.poke();
+
+        uint256 before = usdc.balanceOf(alice) + usdc.balanceOf(bob);
+        vm.warp(block.timestamp + 60);
+        uint256 l = open(alice, true, 1_000 * USDC, 20);
+        uint256 sh = open(bob, false, 1_000 * USDC, 20);
+        setPx(349_860); // +2%
+        pool.poke();
+        setPx(356_720); // +4% from 343
+        assertEq(pool.haircutAt(l, 356.72e18), 1500);
+        vm.warp(block.timestamp + 60);
+        close(bob, sh); // loses $800 of $1,000 margin
+        close(alice, l); // wins $800, pays 15% of it
+        uint256 eq = pool.equity(356.72e18);
+        uint256 pairShareValue = (pool.shares(alice) + pool.shares(bob)) * eq / pool.totalShares();
+        int256 pair = int256(usdc.balanceOf(alice) + usdc.balanceOf(bob) + pairShareValue) - int256(before);
+        emit log_named_int("pair net at the floor (USDC units)", pair);
+        assertLt(pair, 0);
+    }
+
+    /// Item 5: with the falling haircut, what the pool is left with after everything closes still
+    /// sits between the low end (equity before the closes) and the high end (shareValuation).
+    function testFuzz_boundsHoldWithHaircutCurve(uint16 levL, uint16 levS, uint16 moveBps, bool up) public {
+        levL = uint16(bound(levL, 1, 20));
+        levS = uint16(bound(levS, 1, 20));
+        moveBps = uint16(bound(moveBps, 0, 390)); // two latch steps of under 2% each
+        uint256 l = open(alice, true, 2_000 * USDC, levL);
+        uint256 sh = open(bob, false, 3_000 * USDC, levS);
+        uint256 half = uint256(moveBps) / 2;
+        uint64 p1 = uint64(up ? 350_000 * (10_000 + half) / 10_000 : 350_000 * (10_000 - half) / 10_000);
+        uint64 p2 = uint64(up ? 350_000 * (10_000 + uint256(moveBps)) / 10_000 : 350_000 * (10_000 - uint256(moveBps)) / 10_000);
+        setPx(p1);
+        pool.poke();
+        setPx(p2);
+        uint256 price = uint256(p2) * 1e15;
+        uint256 low = pool.equity(price);
+        uint256 high = pool.shareValuation();
+        vm.warp(block.timestamp + 60);
+        (address ownerL,,,,,,,,,,) = pool.positions(l);
+        if (ownerL != address(0)) {
+            try pool.liquidate(l) {} catch { close(alice, l); }
+        }
+        (address ownerS,,,,,,,,,,) = pool.positions(sh);
+        if (ownerS != address(0)) {
+            try pool.liquidate(sh) {} catch { close(bob, sh); }
+        }
+        uint256 after_ = pool.poolBalance() > pool.totalDebt() ? pool.poolBalance() - pool.totalDebt() : 0;
+        assertGe(after_ + 1, low); // rounding: at most one unit
+        assertLe(after_, high);
     }
 }

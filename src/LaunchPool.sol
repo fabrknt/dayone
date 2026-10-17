@@ -46,8 +46,15 @@ contract LaunchPool {
         uint256 maxNotional; // per position
         uint16 maxJumpBps;
         uint256 maxNetNotional; // |long OI - short OI|: what the pool can lose to one move
-        uint16 winHaircutBps; // share of each profit the pool keeps
-        uint16 rebateBps; // value of shares minted per unit of loss; must be below winHaircutBps
+        // Share of each profit the pool keeps, falling with the size of the win: winHaircutBps
+        // while the price has moved at most haircutFromMoveBps from entry, winHaircutMinBps from
+        // haircutToMoveBps on, linear in between. Measured on the price move, not on return on
+        // margin, so leverage cannot buy a lower rate.
+        uint16 winHaircutBps;
+        uint16 winHaircutMinBps;
+        uint16 haircutFromMoveBps;
+        uint16 haircutToMoveBps;
+        uint16 rebateBps; // value of shares minted per unit of loss; must be below winHaircutMinBps
         uint16 redeemBufferBps; // of net OI, held back from redemption on top of minReserve
     }
 
@@ -60,7 +67,7 @@ contract LaunchPool {
         uint64 requestedAt; // pending open or close
         bool closing;
         uint16 feeBps; // fixed at request: the close fee is charged at this rate
-        uint16 haircutBps; // fixed at request
+        uint64 haircut; // the curve fixed at request: max, min, from, to (16 bits each)
         uint16 maintenanceBps; // fixed at request: a later raise cannot liquidate this position
         uint256 openFee; // paid at request; refunded on cancel, pool income on settle
     }
@@ -261,7 +268,7 @@ contract LaunchPool {
             uint64(block.timestamp),
             false,
             P.feeBps,
-            P.winHaircutBps,
+            _packHaircut(P),
             P.maintenanceBps,
             openFee
         );
@@ -381,7 +388,11 @@ contract LaunchPool {
     // ---- internals ----
 
     function _validate(Params memory p) internal pure {
-        if (p.rebateBps >= p.winHaircutBps) revert RebateNotBelowHaircut();
+        // the rebate stays below the lowest point of the curve, so washing loses at every size
+        if (p.rebateBps >= p.winHaircutMinBps) revert RebateNotBelowHaircut();
+        if (p.winHaircutMinBps > p.winHaircutBps || p.haircutFromMoveBps >= p.haircutToMoveBps || p.haircutToMoveBps > 10_000) {
+            revert BadParams();
+        }
         if (p.redeemBufferBps < MIN_REDEEM_BUFFER_BPS) revert BadParams();
         if (p.minNotional == 0 || p.minNotional > p.maxNotional) revert BadParams();
         if (p.capWindow < ExposureBudget.SLICES || p.capWindow % ExposureBudget.SLICES != 0) revert BadParams();
@@ -449,6 +460,30 @@ contract LaunchPool {
         return longOI > shortOI ? longOI - shortOI : shortOI - longOI;
     }
 
+    function _packHaircut(Params storage P) internal view returns (uint64) {
+        return uint64(P.winHaircutBps) << 48 | uint64(P.winHaircutMinBps) << 32 | uint64(P.haircutFromMoveBps) << 16
+            | uint64(P.haircutToMoveBps);
+    }
+
+    /// The haircut for a win, from the curve stored with the position and the price move since
+    /// entry. Never below the curve's minimum, so never at or below the rebate.
+    function _haircutBps(uint64 c, uint256 entry, uint256 price) internal pure returns (uint256) {
+        uint256 hi = uint16(c >> 48);
+        uint256 lo = uint16(c >> 32);
+        uint256 from = uint256(uint16(c >> 16)) * 100; // in hundredths of a bp, so the
+        uint256 to = uint256(uint16(c)) * 100; // rate moves smoothly, not in whole-bp steps
+        uint256 move = (price > entry ? price - entry : entry - price) * 1_000_000 / entry;
+        if (move <= from) return hi;
+        if (move >= to) return lo;
+        return hi - (hi - lo) * (move - from) / (to - from);
+    }
+
+    /// The haircut a position closed at `price` would pay, for UIs and keepers.
+    function haircutAt(uint256 id, uint256 price) external view returns (uint256) {
+        Position storage p = positions[id];
+        return p.entry == 0 ? 0 : _haircutBps(p.haircut, p.entry, price);
+    }
+
     function _pnl(Position memory p, uint256 price) internal pure returns (int256) {
         int256 notional = int256(p.margin * p.leverage);
         int256 move = (int256(price) - int256(p.entry)) * notional / int256(p.entry);
@@ -466,7 +501,7 @@ contract LaunchPool {
         uint256 queued;
         if (pnl >= 0) {
             // net of the close fee and the win haircut, both of which stay in the pool
-            uint256 profit = uint256(pnl) - uint256(pnl) * p.haircutBps / 10_000;
+            uint256 profit = uint256(pnl) - uint256(pnl) * _haircutBps(p.haircut, p.entry, price) / 10_000;
             paid = profit <= poolBalance ? profit : poolBalance;
             poolBalance -= paid;
             queued = profit - paid;

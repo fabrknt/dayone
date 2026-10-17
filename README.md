@@ -12,8 +12,13 @@ market's deployer while the book is thin, and retired once it is deep enough.
 
 - **Loss-funded.** Starts empty; traders' losses and fees fill it. Profits the pool cannot pay yet
   wait in a FIFO queue, paid from later losses (the Papertrade model).
-- **Rebates and haircut.** Losers get pool shares worth `rebateBps` of their loss (default 20%);
-  winners give `winHaircutBps` of their profit to the pool (default 30%). rebate < haircut is
+- **Rebates and haircut.** Losers get pool shares worth `rebateBps` of their loss (default 12%).
+  Winners give the pool a share of their profit that falls with the size of the price move:
+  `winHaircutBps` (30%) up to `haircutFromMoveBps` (0.25%), `winHaircutMinBps` (15%) from
+  `haircutToMoveBps` (1%), linear in between (as Papertrade does: high on small wins, about 10%
+  past a 1% move). It is measured on the price move, not on return on margin, so leverage cannot
+  buy a lower rate. Each position keeps the curve in force at its request. rebate < the curve's
+  floor is
   enforced, which is what makes washing between two own accounts lose money.
 - **Shares priced high, redeemed low.** New shares are priced at `shareValuation()` = balance +
   open positions' margin + pending opens' margin and fee − queued debt, the most today's
@@ -33,12 +38,12 @@ market's deployer while the book is thin, and retired once it is deep enough.
   position keeps the fee, haircut and maintenance it was opened with. `rearm` (after a real gap
   trips the latch), pausing opens and `graduate()` are immediate.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (16.8 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (18.1 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (30 tests, including regressions for review
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (35 tests, including regressions for review
   findings: `test_r1_*` to `test_r4_*`)
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
@@ -85,4 +90,4 @@ Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 cl
 on a local machine until then); the win-haircut curve (branch `feat/haircut-curve`, to review
 as round 7); calendars beyond 2026 and other exchanges; audit; mainnet.
 
-`forge test` (30 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.
+`forge test` (35 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.

@@ -16,7 +16,7 @@ Figures are as of 2026-10-17; update this file first when they change.
                     ("Initial liquidity", "A counterparty pool that starts empty, is filled by traders' losses and fees, and is retired once the book is deep enough."),
                     ("Price anomalies", "Fills and liquidations wait whenever HL Price Guard rejects the price: a jump since the last accepted price, a gap to the book, or a gap to an outside reference."),
                     ("Exposure caps", "Opens and closes each have a rolling cap per minute, sized from the book's depth, and net open interest is capped."),
-                    ("Who carries the losses", "Losers get pool shares worth 20% of what they lost; winners give 30% of their profit to the pool. The rebate is kept below the haircut, so trading against yourself from two accounts loses money."),
+                    ("Who carries the losses", "Losers get pool shares worth 12% of what they lost. Winners leave part of their profit in the pool: 30% on small moves, falling to 15% once the price has moved 1%, as Papertrade does. The rebate is kept below even the lowest haircut, so trading against yourself from two accounts loses money at any size. Rebates are not cut for large losses either: the pool lives only until the book is deep enough, so the dilution has an end."),
                 ]),
                 ("What it found", [
                     ("Papertrade, 2026-10-10", "Replaying the 228 positions: settling at the oracle instead of the book cut the take by only 15%, because the oracle moved with the push. A per-minute cap of $3.3M would have held it to at most $55K against the $131K the attacker spent."),
@@ -43,7 +43,7 @@ Figures are as of 2026-10-17; update this file first when they change.
                     ("初期の流動性", "空から始まり、トレーダーの損失と手数料で積み上がり、板が十分に厚くなったら役目を終える相手方のプールです。"),
                     ("価格の異常", "HL Price Guard が価格を拒んでいる間は、約定も清算も待たせます。直前に受け入れた価格からの急変、板とのずれ、外部の参照価格とのずれが対象です。"),
                     ("露出の上限", "建てる側と閉じる側のそれぞれに、板の厚さから決めた1分あたりの上限をかけ、差し引きの建玉にも上限をかけます。"),
-                    ("損失を誰が負うか", "負けた人には損失の20%に当たる価値のプールの持分を渡し、勝った人は利益の30%をプールに残します。報酬を取り分より小さく保つので、自分の2つの口座で売り買いしても損になります。"),
+                    ("損失を誰が負うか", "負けた人には損失の12%に当たる価値のプールの持分を渡します。勝った人は利益の一部をプールに残します。値動きが小さいときは30%、価格が1%動くと15%まで下がります(Papertrade と同じ考え方です)。報酬は最も低い取り分よりも小さく保つので、自分の2つの口座で売り買いすると、どの大きさでも損になります。報酬の発行は大きな損失でも減らしません。プールは板が十分に厚くなるまでの期間限定なので、薄まりにも終わりがあるからです。"),
                 ]),
                 ("わかったこと", [
                     ("Papertrade(2026-10-10)", "228件の建玉を再現すると、板ではなくオラクルで決済しても抜かれる額は15%しか減りませんでした。押し込みに合わせてオラクルも動いていたためです。1分あたり330万ドルの上限があれば、攻撃側が使った13.1万ドルに対して最大5.5万ドルに抑えられました。"),
