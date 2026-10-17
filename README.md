@@ -42,7 +42,7 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
-  The pin is `v0.2.1` (b03e605); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
+  The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
 - `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
