@@ -20,7 +20,7 @@ import {
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { marketStatus as nyseStatus } from "./campana.mjs";
+import { marketStatus as nyseStatus, CALENDAR_2026 as NYSE_2026 } from "./campana.mjs";
 import { marketStatus as krxStatus } from "./krx.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
@@ -44,7 +44,12 @@ const pub = createPublicClient({ transport: http(rpc) });
 const wallet = createWalletClient({ account, transport: http(rpc) });
 const once = process.argv.includes("--once");
 const marketHours = process.env.MARKET_HOURS; // "nyse", "krx" or unset
-const hoursFn = ({ nyse: nyseStatus, krx: krxStatus } as Record<string, (ts: number) => { status: string }>)[marketHours ?? ""];
+// campana.mjs does not check its own range; krx.mjs throws outside it. Both end up the same here.
+const nyseChecked = (ts: number) => {
+  if (ts < NYSE_2026.validFrom || ts >= NYSE_2026.validUntil) throw new Error(`NYSE calendar ${NYSE_2026.version} does not cover ${ts}`);
+  return nyseStatus(ts);
+};
+const hoursFn = ({ nyse: nyseChecked, krx: krxStatus } as Record<string, (ts: number) => { status: string }>)[marketHours ?? ""];
 if (marketHours && !hoursFn) throw new Error(`MARKET_HOURS must be nyse or krx, got ${marketHours}`);
 // HLPriceGuard.Breach, in order
 const BREACH = ["None", "EmptyBook", "Spread", "MarkOracle", "MidOracle", "RefStale", "RefOracle", "Jump"];
@@ -97,22 +102,18 @@ const poolResult = (functionName: string, data: Hex) =>
 
 let lastOracle = -1n;
 let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
-let params: { maintenanceBps: bigint; settleDelay: bigint; at: number } | undefined;
 
 async function tick() {
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
   }
-  if (!params || Date.now() - params.at > 60_000) { // params change only after paramsDelay
-    const p = await read("getParams");
-    params = { maintenanceBps: BigInt(p.maintenanceBps), settleDelay: BigInt(p.settleDelay), at: Date.now() };
-  }
-  const [rawPx, rawNow, rawIds, rawPaused] = await batch([
+  const [rawPx, rawNow, rawIds, rawPaused, rawParams] = await batch([
     { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
     { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
     poolCall("activeIds"),
     poolCall("opensPaused"),
+    poolCall("getParams"), // every tick: a delay cut by applyParams must take effect at once
   ]);
   const [px] = decodeAbiParameters([{ type: "uint64" }], rawPx);
   const oracle = (px as bigint) * asset.scale;
@@ -125,14 +126,23 @@ async function tick() {
   }
 
   if (hoursFn) {
-    const shouldPause = hoursFn(Number(now)).status === "CLOSED";
+    // Outside the calendar the keeper cannot tell open from closed, so it keeps opens paused
+    // and carries on settling and liquidating; the calendar needs renewing.
+    let shouldPause: boolean;
+    try {
+      shouldPause = hoursFn(Number(now)).status === "CLOSED";
+    } catch (e) {
+      console.log(`${new Date().toISOString()} CALENDAR EXPIRED, opens stay paused: ${(e as Error).message}`);
+      shouldPause = true;
+    }
     if (poolResult("opensPaused", rawPaused) !== shouldPause) await send("setOpensPaused", [shouldPause]);
   }
 
-  const { maintenanceBps, settleDelay } = params;
+  const settleDelay = BigInt(poolResult("getParams", rawParams).settleDelay);
   const rows = ids.length ? await batch(ids.map((id) => poolCall("positions", [id]))) : [];
   for (const [i, id] of ids.entries()) {
-    const [owner, long, leverage, margin, entry, requestedAt, closing] = poolResult("positions", rows[i]);
+    // maintenance is the one stored with the position when it was opened, as the contract uses
+    const [owner, long, leverage, margin, entry, requestedAt, closing, , , maintenanceBps] = poolResult("positions", rows[i]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {
       await send("settle", [id]);
@@ -142,7 +152,7 @@ async function tick() {
       const notional = margin * BigInt(leverage);
       const move = ((oracle - entry) * notional) / entry;
       const equity = margin + (long ? move : -move);
-      if (equity < (notional * maintenanceBps) / 10000n) await send("liquidate", [id]);
+      if (equity < (notional * BigInt(maintenanceBps)) / 10000n) await send("liquidate", [id]);
     }
   }
 }

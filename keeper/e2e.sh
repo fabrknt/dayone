@@ -77,4 +77,10 @@ check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(boo
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792458000 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2026-10-20 01:00 UTC = 10:00 KST
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Tuesday 10:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+echo "7. past the calendar: opens stay paused and the keeper carries on"
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1799143200 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2027-01-05 10:00 UTC
+LOG=$(mktemp)
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
+grep -q "CALENDAR EXPIRED" $LOG && ! grep -q "tick failed" $LOG && echo "ok   calendar expiry logged, tick completed" || { cat $LOG; echo "FAIL calendar expiry"; exit 1; }
+check "paused past the calendar" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 echo "all ok"

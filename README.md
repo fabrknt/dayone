@@ -81,4 +81,4 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 A keeper on a host that stays up (the testnet keeper runs on a local machine); calendars beyond
 2026 and other exchanges; audit; mainnet.
 
-`forge test` (30 tests); `npm install && ./keeper/e2e.sh` (10 checks); `node --test keeper/krx.test.mjs`.
+`forge test` (30 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.

@@ -11,9 +11,12 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 - Page: `?net=testnet&pool=0x372Efd44DD50FBc0b070A0729756659f12539040&usdc=0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`.
 - Keeper host: moving from a local machine to an existing always-on host as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
-  under its own user, capped at 200 MB and a quarter of a CPU, the key readable only by that user
-  in `/etc/dayone`). Checked end to end in an Amazon Linux 2023 arm64 container with systemd:
-  installed, started, poked testnet, 68 MB.
+  as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
+  checksum-verified Node), the key in `/etc/dayone-keeper` readable only by that user, one unit
+  capped at 200 MB and a quarter of a CPU). It refuses to run over anything it did not make, and
+  an upgrade switches releases only once the new one is complete. Checked in an Amazon Linux 2023
+  arm64 container with systemd: refuses an existing user, installs, upgrades, survives a corrupt
+  bundle, pokes testnet.
 - Rate limit: the public testnet RPC rejected about one tick in six ("Request exceeds defined
   limit") when the keeper made 7 reads a tick. It now reads through Multicall3 (1 call a tick, 2
   with positions) and the hosted keeper ticks every 2 s (`TICK_MS`): no failures in 90 s.
