@@ -30,7 +30,7 @@ so keep the meaning of each sentence stable.
                     "The reviews found and closed accounting and share-pricing flaws, among them a way for one trader's open loss to offset another's open profit, ways to take value from earlier shareholders by trading against oneself, a way to collect shares just before pending orders' fees reached the pool, and a way to pair an old haircut with a newer, higher rebate across a parameter change. Shares are now priced at the most the pool can reach from the positions open or requested at the time, and redeemed at a conservative value.",
                 ]),
                 ("Status", [
-                    "Deployed on HyperEVM testnet against xyz:TSLA, with test USDC; not deployed to mainnet, and not audited. It is not offered to traders.",
+                    "Deployed on HyperEVM testnet against xyz:TSLA, with test USDC (pool 0x183AA811bFc913fCf5630cbAA4B85b3a8499a707); not deployed to mainnet, and not audited. It is not offered to traders.",
                     "It uses HL Price Guard pinned to a tagged version (v0.2.1). It moves forward when an operator has a concrete need for it, for example a new or pre-IPO listing whose book will start thin; if that is you, request a readiness review.",
                 ]),
             ],
@@ -57,7 +57,7 @@ so keep the meaning of each sentence stable.
                     "会計と持分の値付けの欠陥を見つけて塞ぎました。ある人の含み損が別の人の含み益と相殺されてしまう問題や、自分を相手に売り買いして先にいた持分の保有者から価値を抜ける問題、約定待ちの注文の手数料を当て込んで持分を受け取る問題、パラメータ変更をまたいで古い取り分と新しい高い報酬を組み合わせる問題などです。いまは、持分はその時点の建玉と約定待ちの注文から到達しうる最大の価値で値付けし、払い戻しは控えめな評価で行います。",
                 ]),
                 ("いまの状態", [
-                    "HyperEVM の testnet に、xyz:TSLA を対象としてテスト用の USDC で配置しています。mainnet には配置しておらず、監査も受けていません。トレーダー向けに提供していません。",
+                    "HyperEVM の testnet に、xyz:TSLA を対象としてテスト用の USDC で配置しています(プール 0x183AA811bFc913fCf5630cbAA4B85b3a8499a707)。mainnet には配置しておらず、監査も受けていません。トレーダー向けに提供していません。",
                     "HL Price Guard はタグの付いた版(v0.2.1)に固定して使っています。運営者に具体的な必要があるときに進めます。たとえば、板が薄いところから始まる新規上場や pre-IPO の銘柄です。該当する方は運営準備レビューからご連絡ください。",
                 ]),
             ],

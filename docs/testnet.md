@@ -2,10 +2,14 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
-## Current deployment (2026-10-18, with the haircut curve)
-- Pool `0x710303a3Ee5C136e71C6AA87a1Bc8f5a84C5d6D6`, mock USDC `0xA57854Ba3dBC593c8c3746Aa312bFFdA5b49A101`
-  (xyz:TSLA, the testnet defaults below). Redeployed for the win-haircut curve (e9c7a66); the
-  first pool (0x372E…9040, flat haircut) is abandoned with one $200 test long open.
+## Current deployment (2026-10-18, dedicated key, with the haircut curve)
+- Pool `0x183AA811bFc913fCf5630cbAA4B85b3a8499a707`, mock USDC `0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`
+  (xyz:TSLA, the testnet defaults below). Deployed and operated by a key used only for Day One
+  testnet (operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9`), in `the operator key file`
+  (mode 600, with the `0x` prefix). Its HyperCore account was created by sending 0.05 HYPE from the
+  EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be turned on after.
+- Earlier pools, abandoned (test positions closed, about $0.20 of mock-USDC fees left in each):
+  `0x7103…d6D6` (curve, previous key) and `0x372E…9040` (flat haircut).
 - First run: `poke` with the real precompiles, then a $200 long requested and settled by the
   keeper at 373.42, the same oracle the HL API reported. On the new pool the position stores the
   curve (30% -> 15%, 0.25% -> 1%) and the 12% rebate; `haircutAt` at a 1.76% move gives 15%.
@@ -13,7 +17,7 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   keeper logged it as ok. The keeper now adds 30% to the estimate and treats only a receipt with
   status success as done (anything else is logged REVERTED). The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
-- Page: `?net=testnet&pool=0x710303a3Ee5C136e71C6AA87a1Bc8f5a84C5d6D6&usdc=0xA57854Ba3dBC593c8c3746Aa312bFFdA5b49A101`.
+- Page: `?net=testnet&pool=0x183AA811bFc913fCf5630cbAA4B85b3a8499a707&usdc=0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`.
 - Keeper host: moving from a local machine to an existing always-on host as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
