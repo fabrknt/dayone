@@ -2,13 +2,18 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
-## Current deployment (2026-10-17)
-- Pool `0x372Efd44DD50FBc0b070A0729756659f12539040`, mock USDC `0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`
-  (xyz:TSLA, the testnet defaults below). Deploying cost 0.00042 HYPE at 0.1 gwei.
+## Current deployment (2026-10-18, with the haircut curve)
+- Pool `0x710303a3Ee5C136e71C6AA87a1Bc8f5a84C5d6D6`, mock USDC `0xA57854Ba3dBC593c8c3746Aa312bFFdA5b49A101`
+  (xyz:TSLA, the testnet defaults below). Redeployed for the win-haircut curve (e9c7a66); the
+  first pool (0x372E…9040, flat haircut) is abandoned with one $200 test long open.
 - First run: `poke` with the real precompiles, then a $200 long requested and settled by the
-  keeper at 373.42, the same oracle the HL API reported. The keeper runs with
+  keeper at 373.42, the same oracle the HL API reported. On the new pool the position stores the
+  curve (30% -> 15%, 0.25% -> 1%) and the 12% rebate; `haircutAt` at a 1.76% move gives 15%.
+- Gas: on the new pool viem's exact estimate ran a settle out of gas (285,766 of 285,766) and the
+  keeper logged it as ok. The keeper now adds 30% to the estimate and treats only a receipt with
+  status success as done (anything else is logged REVERTED). The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
-- Page: `?net=testnet&pool=0x372Efd44DD50FBc0b070A0729756659f12539040&usdc=0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`.
+- Page: `?net=testnet&pool=0x710303a3Ee5C136e71C6AA87a1Bc8f5a84C5d6D6&usdc=0xA57854Ba3dBC593c8c3746Aa312bFFdA5b49A101`.
 - Keeper host: moving from a local machine to an existing always-on host as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a

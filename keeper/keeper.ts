@@ -73,12 +73,19 @@ function why(e: unknown): string {
   return String(e);
 }
 
-/// Simulate first so a revert (breach, too early, not liquidatable) costs no gas.
+/// Simulate first so a revert (breach, too early, not liquidatable) costs no gas. The gas limit
+/// is the estimate plus 30%: on HyperEVM testnet an exact estimate ran out of gas (a settle used
+/// 285,766 of 285,766). Only a receipt with status success counts as done.
 async function send(functionName: string, args: unknown[] = []): Promise<boolean> {
   try {
     const { request } = await pub.simulateContract({ account, address: pool, abi, functionName, args });
-    const hash = await wallet.writeContract(request);
-    await pub.waitForTransactionReceipt({ hash });
+    const gas = await pub.estimateContractGas({ account, address: pool, abi, functionName, args });
+    const hash = await wallet.writeContract({ ...request, gas: (gas * 13n) / 10n });
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") {
+      console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) REVERTED on chain ${hash} (gas ${receipt.gasUsed})`);
+      return false;
+    }
     console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
     return true;
   } catch (e) {
