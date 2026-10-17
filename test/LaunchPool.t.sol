@@ -419,6 +419,49 @@ contract LaunchPoolTest is Test {
         assertEq(pool.activeIds().length, 0);
     }
 
+    // ---- regressions for Codex round 2 ----
+
+    /// R2-N1: a wash whose losing leg closes first (pool worth less than the rebate) must not give
+    /// the washer every share. Each mint is capped at half the pool's fair value.
+    function test_r2_firstMintCappedWhenPoolIsWorthLittle() public {
+        uint256 l = open(alice, true, 10_000 * USDC, 10);
+        uint256 sh = open(bob, false, 10_000 * USDC, 10);
+        setPx(346_500); // alice (long) loses $1,000, bob (short) is up $1,000 and still open
+        vm.warp(block.timestamp + 70);
+        close(alice, l);
+        uint256 locked = pool.shares(address(pool));
+        assertGe(locked, pool.shares(alice)); // the washer owns at most half
+        close(bob, sh);
+        // even owning half, the pair cannot take back more than it paid in fees and haircut
+        uint256 aliceShares = pool.shares(alice);
+        vm.prank(alice);
+        uint256 got = pool.redeem(aliceShares);
+        int256 pair = int256(usdc.balanceOf(alice) + usdc.balanceOf(bob)) - int256(2_000_000 * USDC);
+        emit log_named_int("wash pair net after redeem", pair);
+        emit log_named_uint("redeemed", got);
+        assertLt(pair, 0);
+    }
+
+    /// R2-N2: a cap raise needs opens paused; then each open position closes at most once, the
+    /// lanes drain, and the change applies.
+    function test_r2_capRaiseAppliesOnceOpensPaused() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        LaunchPool.Params memory p = defaultParams();
+        p.capWindow = 120;
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        pool.applyParams(); // opens still running
+        pool.setOpensPaused(true);
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        pool.requestOpen(true, 1_000 * USDC, 10); // the recycling trick needs a new open
+        close(alice, id); // the last thing that can touch a lane
+        vm.warp(block.timestamp + 200); // past the longer window plus a slice
+        pool.applyParams();
+        assertEq(pool.getParams().capWindow, 120);
+    }
+
     function test_onlyOperator() public {
         vm.prank(alice);
         vm.expectRevert(LaunchPool.NotOperator.selector);

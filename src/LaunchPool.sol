@@ -134,6 +134,16 @@ contract LaunchPool {
     error RedeemBlocked(uint256 amount, uint256 available);
     error Breach(HLPriceGuard.Breach reason, uint256 observedBps, uint256 limitBps);
 
+    uint256 private _lock = 1;
+
+    /// The collateral is assumed to be a plain ERC20; this also covers tokens with transfer hooks.
+    modifier nonReentrant() {
+        if (_lock != 1) revert BadRequest();
+        _lock = 2;
+        _;
+        _lock = 1;
+    }
+
     modifier onlyOperator() {
         if (msg.sender != operator) revert NotOperator();
         _;
@@ -200,11 +210,16 @@ contract LaunchPool {
         emit ParamsProposed(pendingAt);
     }
 
-    /// Anyone, once the delay has passed. Reverts (try later) if the rolling caps still hold
-    /// notional settled under the old cap or window.
+    /// Anyone, once the delay has passed. A higher cap or a new window also needs opens paused
+    /// (setOpensPaused) and reverts until the rolling lanes have drained under the old settings.
     function applyParams() external {
         if (pendingAt == 0 || block.timestamp < pendingAt) revert TooEarly();
         Params memory p = _pendingParams;
+        bool lowerCapOnly = p.capWindow == _params.capWindow && p.capPerWindow <= _params.capPerWindow;
+        // Raising the cap or changing the window waits until nothing settled under the old one is
+        // in the window. With opens paused that is bounded: each open position closes only once.
+        // Otherwise a trader could recycle a small position to keep the lanes busy forever.
+        if (!lowerCapOnly && !opensPaused) revert OpensClosed();
         if (p.capPerWindow != _params.capPerWindow || p.capWindow != _params.capWindow) {
             _openLane.reconfigure(p.capPerWindow, p.capWindow);
             _closeLane.reconfigure(p.capPerWindow, p.capWindow);
@@ -224,7 +239,7 @@ contract LaunchPool {
 
     // ---- traders ----
 
-    function requestOpen(bool long, uint256 margin, uint16 leverage) external returns (uint256 id) {
+    function requestOpen(bool long, uint256 margin, uint16 leverage) external nonReentrant returns (uint256 id) {
         Params storage P = _params;
         if (opensPaused || graduated) revert OpensClosed();
         if (margin == 0 || leverage == 0 || leverage > P.maxLeverage) revert BadRequest();
@@ -243,7 +258,7 @@ contract LaunchPool {
     }
 
     /// Withdraw a pending open, e.g. while the guard keeps rejecting the price.
-    function cancelOpen(uint256 id) external {
+    function cancelOpen(uint256 id) external nonReentrant {
         Position memory p = positions[id];
         if (p.owner != msg.sender) revert NotOwner();
         if (p.entry != 0) revert BadRequest();
@@ -261,7 +276,7 @@ contract LaunchPool {
     }
 
     /// Anyone (usually a keeper) settles a pending open or close at the guarded oracle.
-    function settle(uint256 id) external {
+    function settle(uint256 id) external nonReentrant {
         Position storage p = positions[id];
         if (p.owner == address(0) || (p.entry != 0 && !p.closing)) revert BadRequest();
         if (block.timestamp < p.requestedAt + _params.settleDelay) revert TooEarly();
@@ -273,8 +288,8 @@ contract LaunchPool {
             _addOI(p.long, notional, p.margin, price);
             uint256 net = _net();
             if (net > _params.maxNetNotional) revert NetExposureExceeded(net, _params.maxNetNotional);
+            p.entry = price; // state before the token transfers in _income
             _income(p.openFee);
-            p.entry = price;
             emit Opened(id, price);
         } else {
             _closeLane.spend(notional, _params.capPerWindow, _params.capWindow);
@@ -282,7 +297,7 @@ contract LaunchPool {
         }
     }
 
-    function liquidate(uint256 id) external {
+    function liquidate(uint256 id) external nonReentrant {
         Position memory p = positions[id];
         if (p.entry == 0) revert BadRequest();
         uint256 price = _price();
@@ -309,7 +324,7 @@ contract LaunchPool {
 
     /// Burn shares for their part of the pool's equity, at the guarded oracle. Blocked while
     /// winners are queued, and limited to equity above minReserve plus a buffer on net OI.
-    function redeem(uint256 amountShares) external returns (uint256 amount) {
+    function redeem(uint256 amountShares) external nonReentrant returns (uint256 amount) {
         if (totalDebt != 0 || amountShares == 0 || amountShares > shares[msg.sender]) revert BadRequest();
         uint256 eq = equity(_price());
         amount = amountShares * eq / totalShares;
@@ -475,21 +490,23 @@ contract LaunchPool {
     /// The first mint also creates locked shares (held by this contract, never redeemable) for
     /// the rest of the value, so the first loser's shares are worth the rebate and no more.
     function _mintShares(address to, uint256 loss, uint256 price) internal {
-        uint256 value = loss * _params.rebateBps / 10_000;
-        if (value == 0) return;
         uint256 eq = fairEquity(price);
+        uint256 value = loss * _params.rebateBps / 10_000;
+        // at most half the pool's value per mint: when the pool is worth less than the rebate
+        // (the other leg of a wash still open), the rebate shrinks instead of the first minter
+        // ending up with every share
+        if (value > eq / 2) value = eq / 2;
+        if (value == 0) return;
         uint256 s_;
         uint256 locked;
         if (totalShares == 0) {
-            // 1 share = 1 collateral unit at the start
+            // 1 share = 1 collateral unit at the start; locked >= s_ by the cap above
             s_ = value;
-            locked = eq > value ? eq - value : 0;
-        } else if (eq > value) {
-            // value is already inside eq (the loss was just added), so price shares off eq - value
-            s_ = value * totalShares / (eq - value);
+            locked = eq - value;
         } else {
-            // existing shares are worth nothing right now; this mint is worth at most `value`
-            s_ = value;
+            // value is already inside eq (the loss was just added), so price shares off eq - value;
+            // eq - value >= eq / 2 > 0 by the cap above
+            s_ = value * totalShares / (eq - value);
         }
         shares[to] += s_;
         if (locked != 0) shares[address(this)] += locked;
