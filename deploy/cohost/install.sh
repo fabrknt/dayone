@@ -6,9 +6,13 @@
 # Everything it creates is namespaced dayone-keeper and nothing else on the host is touched:
 #   user dayone-keeper (no login), /opt/dayone-keeper (root-owned: releases, Node, a marker),
 #   /etc/dayone-keeper/key (readable only by dayone-keeper), /etc/systemd/system/dayone-keeper.service
-# It refuses to run if any of those exist without its marker, so it never takes over something
-# another project made. An upgrade stages a new release and switches to it only once it is
-# complete; a failed upgrade leaves the running release and its files as they were.
+#
+# - It refuses to run if any of those exist without its marker, so it never takes over
+#   something another project made. The marker is written only after the first install has
+#   started a healthy service; a first install that fails removes everything it created.
+# - An upgrade stages a new release, switches to it, and checks the service stays up. If it
+#   does not, the previous release and key are put back and the old service restarted.
+# - Installs are serialised with a lock.
 set -euo pipefail
 BUNDLE=${1:?bundle}
 KEYFILE=${2:-}
@@ -25,20 +29,43 @@ declare -A NODE_SHA256=( # from https://nodejs.org/dist/v24.11.1/SHASUMS256.txt
 die() { echo "install.sh: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root"
 
-# 1. Only proceed on a clean host or on our own earlier install.
+exec 9>/run/$NAME.install.lock
+flock -n 9 || die "another install is running"
+
+# 1. Only proceed on a clean host or on our own committed install.
+FIRST=0
 if [ -e "$MARKER" ]; then
   [ "$(stat -c %u "$MARKER")" = 0 ] || die "$MARKER is not root-owned"
+  [ -e "$ETC/key" ] || [ -n "$KEYFILE" ] || die "no key installed; pass the key file"
 else
   for p in "$BASE" "$ETC" "$UNIT"; do [ -e "$p" ] && die "$p exists but was not made by this script"; done
   id "$NAME" >/dev/null 2>&1 && die "user $NAME exists but was not made by this script"
   [ -n "$KEYFILE" ] || die "first install needs the key file"
+  FIRST=1
 fi
 [ -z "$KEYFILE" ] || [ -s "$KEYFILE" ] || die "key file $KEYFILE is empty or missing"
-
 ARCH=$(uname -m); case $ARCH in aarch64) ARCH=arm64 ;; x86_64) ARCH=x64 ;; *) die "unsupported arch $ARCH" ;; esac
+
+# On any failure of a first install, remove everything it created; the host is as before.
+STAGE=
+cleanup() {
+  local rc=$?
+  [ -n "$STAGE" ] && rm -rf "$STAGE"
+  # the uploaded key never stays where it was uploaded, whatever happened (rerun with a new copy)
+  [ -n "$KEYFILE" ] && { shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"; }
+  if [ $rc -ne 0 ] && [ $FIRST = 1 ]; then
+    systemctl disable --now $NAME >/dev/null 2>&1 || true
+    rm -f "$UNIT"; systemctl daemon-reload || true
+    rm -rf "$BASE" "$ETC"
+    id $NAME >/dev/null 2>&1 && userdel $NAME || true
+    echo "install.sh: first install failed; removed what it created" >&2
+  fi
+}
+trap cleanup EXIT
+
 umask 022
 install -d -m 755 -o root -g root "$BASE" "$BASE/releases"
-[ -e "$MARKER" ] || { id "$NAME" >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin "$NAME"; touch "$MARKER"; }
+[ $FIRST = 0 ] || useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin $NAME
 
 # 2. Our own Node, root-owned, checksum verified.
 NODEDIR=$BASE/node-$NODE-linux-$ARCH
@@ -48,16 +75,12 @@ if [ ! -x "$NODEDIR/bin/node" ]; then
   echo "${NODE_SHA256[$ARCH]}  $T/node.tgz" | sha256sum -c --quiet - || { rm -rf "$T"; die "Node checksum mismatch"; }
   tar -xzf "$T/node.tgz" -C "$T"
   chown -R root:root "$T/node-$NODE-linux-$ARCH"
-  mv "$T/node-$NODE-linux-$ARCH" "$NODEDIR"
+  mv -T "$T/node-$NODE-linux-$ARCH" "$NODEDIR"
   rm -rf "$T"
 fi
 
-# 3. Stage the new release; nothing live changes until it is complete.
-REL=$BASE/releases/$(date -u +%Y%m%dT%H%M%SZ)
-STAGE=$REL.partial
-rm -rf "$STAGE"
-install -d -m 755 -o root -g root "$STAGE"
-trap 'rm -rf "$STAGE"' EXIT
+# 3. Stage the new release under a unique name; nothing live changes until it is complete.
+STAGE=$(mktemp -d "$BASE/releases/.stage.XXXXXX")
 tar -xzf "$BUNDLE" -C "$STAGE" --no-same-owner
 [ -f "$STAGE/keeper/keeper.ts" ] && [ -f "$STAGE/keeper.env" ] && [ -f "$STAGE/out/LaunchPool.sol/LaunchPool.json" ] || die "bundle is incomplete"
 (cd "$STAGE" && HOME=/nonexistent npm_config_cache="$STAGE/.npm" PATH="$NODEDIR/bin:$PATH" npm ci --omit=dev --no-audit --no-fund --silent)
@@ -71,21 +94,21 @@ case "\$KEY" in 0x*) ;; *) KEY=0x\$KEY ;; esac
 export PRIVATE_KEY=\$KEY
 exec $NODEDIR/bin/node --disable-warning=ExperimentalWarning keeper/keeper.ts
 SH
-chmod 755 "$STAGE/run.sh"
 chown -R root:root "$STAGE"
-chmod -R u=rwX,go=rX "$STAGE" # the bundle's top dir comes from mktemp (0700)
-mv "$STAGE" "$REL"
-trap - EXIT
+chmod -R u=rwX,go=rX "$STAGE" # mktemp makes the top dir 0700
+chmod 755 "$STAGE/run.sh"
+REL=$BASE/releases/$(date -u +%Y%m%dT%H%M%SZ)-${STAGE##*.stage.}
+mv -T "$STAGE" "$REL"
+STAGE=
 
-# 4. The key: replaced atomically, the uploaded copy removed.
+# 4. Switch: key (keeping the old one), release link, unit. Remember what to restore.
+PREV=$(readlink "$BASE/current" 2>/dev/null || true)
+install -d -m 500 -o $NAME -g $NAME "$ETC"
 if [ -n "$KEYFILE" ]; then
-  install -d -m 500 -o "$NAME" -g "$NAME" "$ETC"
-  install -m 400 -o "$NAME" -g "$NAME" "$KEYFILE" "$ETC/key.new"
+  [ -e "$ETC/key" ] && cp -p "$ETC/key" "$ETC/key.prev"
+  install -m 400 -o $NAME -g $NAME "$KEYFILE" "$ETC/key.new"
   mv -f "$ETC/key.new" "$ETC/key"
-  shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"
 fi
-
-# 5. Switch to the new release atomically, then (re)start.
 ln -sfn "$REL" "$BASE/current.new"
 mv -T "$BASE/current.new" "$BASE/current"
 cat > "$UNIT.new" <<UNIT
@@ -120,15 +143,33 @@ WantedBy=multi-user.target
 UNIT
 mv -f "$UNIT.new" "$UNIT"
 systemctl daemon-reload
-systemctl enable "$NAME" >/dev/null
-systemctl restart "$NAME"
+systemctl enable $NAME >/dev/null
 
-# Keep the two newest releases (the running one and the one before it, for rollback).
-ls -1d "$BASE"/releases/*/ 2>/dev/null | sort | head -n -2 | while read -r old; do
-  [ "$(readlink -f "$BASE/current")/" = "$old" ] || rm -rf "$old"
+# 5. Healthy = active and not restarted for 15 s after the restart.
+healthy() {
+  systemctl restart $NAME || return 1
+  sleep 15
+  [ "$(systemctl is-active $NAME)" = active ] && [ "$(systemctl show $NAME -p NRestarts --value)" = 0 ]
+}
+if ! healthy; then
+  journalctl -u $NAME -n 10 --no-pager -o cat >&2 || true
+  if [ $FIRST = 1 ]; then die "the new keeper did not stay up"; fi
+  if [ -n "$PREV" ]; then
+    ln -sfn "$PREV" "$BASE/current.new"; mv -T "$BASE/current.new" "$BASE/current"
+  fi
+  [ -n "$KEYFILE" ] && [ -e "$ETC/key.prev" ] && mv -f "$ETC/key.prev" "$ETC/key"
+  rm -rf "$REL"
+  systemctl restart $NAME || true
+  die "the new keeper did not stay up; rolled back to ${PREV:-nothing}"
+fi
+
+# 6. Committed: mark the install ours, drop the uploaded and previous keys, prune old releases.
+touch "$MARKER"
+rm -f "$ETC/key.prev"
+CUR=$(readlink -f "$BASE/current")
+ls -1d "$BASE"/releases/2*/ 2>/dev/null | sort | head -n -2 | while read -r old; do
+  [ "${old%/}" = "$CUR" ] || rm -rf "$old"
 done
-
-sleep 8
-systemctl is-active "$NAME"
-journalctl -u "$NAME" -n 5 --no-pager -o cat
+systemctl is-active $NAME
+journalctl -u $NAME -n 5 --no-pager -o cat
 echo "rollback: ln -sfn <older release> $BASE/current && systemctl restart $NAME"
