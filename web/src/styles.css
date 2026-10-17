@@ -57,6 +57,12 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; font-weight: 500; color: var(--dim); font-size: 12.5px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 td { padding: 8px; border-bottom: 1px solid var(--line); }
 .card:has(table) { overflow-x: auto; }
+/* phone width: drop the id and entry columns so the Close/Cancel button stays in view */
+@media (max-width: 480px) {
+  .wide-only { display: none; }
+  th, td { padding: 6px 5px; }
+  input { font-size: 16px; } /* below 16px, iOS Safari zooms in on focus */
+}
 .long, .up { color: var(--up); }
 .short, .down { color: var(--down); }
 footer { text-align: center; }

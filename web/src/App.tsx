@@ -229,17 +229,17 @@ export default function App() {
         <section className="card">
           <h2>Your positions</h2>
           <table>
-            <thead><tr><th>#</th><th>Side</th><th>Size</th><th>Entry</th><th>PnL at oracle</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th className="wide-only">#</th><th>Side</th><th>Size</th><th className="wide-only">Entry</th><th>PnL at oracle</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {me.positions.map((p) => {
                 const v = market ? pnl(p, market.oracle) : 0n;
                 const st = p.entry === 0n ? "settling" : p.closing ? "closing" : "open";
                 return (
                   <tr key={String(p.id)}>
-                    <td className="mono">{String(p.id)}</td>
+                    <td className="mono wide-only">{String(p.id)}</td>
                     <td className={p.long ? "long" : "short"}>{p.long ? "Long" : "Short"} {p.leverage}x</td>
                     <td className="mono">{usd(p.margin * BigInt(p.leverage), 0)}</td>
-                    <td className="mono">{p.entry ? px(p.entry) : "—"}</td>
+                    <td className="mono wide-only">{p.entry ? px(p.entry) : "—"}</td>
                     <td className={`mono ${v >= 0n ? "up" : "down"}`}>{p.entry ? usd(v) : "—"}</td>
                     <td>{st}</td>
                     <td>
