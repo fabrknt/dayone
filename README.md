@@ -50,8 +50,10 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
-- `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates, reading
-  through Multicall3 so a public RPC's rate limit holds (`TICK_MS`, default 1 s); with
+- `keeper/keeper.ts`: liquidates first, then settles due requests, then pokes when the oracle has
+  drifted a quarter of `maxJumpBps` from the latch's anchor. One batched read a tick through
+  Multicall3 and one budget for every RPC request (`RPC_PER_MIN`, default 90; the public RPC
+  allows 100), gas limits padded 30% under the 2M small-block cap (`TICK_MS`, default 1 s); with
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
   (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
@@ -89,6 +91,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); calendars beyond 2026 and other exchanges; audit; mainnet.
+on a local machine until then); calendars beyond 2026 and other exchanges; bounding the debt queue paid in one transaction
+(`_income` pays every queued winner it can; Codex round 8b, recorded); audit; mainnet.
 
 `forge test` (36 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.

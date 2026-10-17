@@ -2,15 +2,17 @@
 //
 //   RPC_URL=... POOL=0x... PRIVATE_KEY=0x... node keeper/keeper.ts [--once]
 //
-// Every tick (1 s):
-//   1. read the oracle (0x807); if it changed, call poke() so the latch compares against a
-//      recent price (its anchor only moves in a transaction that succeeds);
-//   2. settle every pending open or close whose settleDelay has passed (from activeIds(), so
-//      the work is bounded by live positions, not by every id ever issued);
-//   3. liquidate every open position below maintenance at the current oracle;
-//   4. with MARKET_HOURS=nyse or krx (operator key only), pause new positions while that
+// Every tick (TICK_MS, default 1 s; 3 s on the public RPC), after one batched read:
+//   1. with MARKET_HOURS=nyse or krx (operator key only), pause new positions while that
 //      exchange is closed: out of hours there is no independent stock price to check the
-//      deployer's oracle against. nyse for US stocks, krx for xyz:SKHX and xyz:SMSN.
+//      deployer's oracle against. nyse for US stocks, krx for xyz:SKHX and xyz:SMSN;
+//   2. liquidate every open position below its stored maintenance at the current oracle;
+//   3. settle every pending open or close whose settleDelay has passed (from activeIds(), so
+//      the work is bounded by live positions, not by every id ever issued);
+//   4. poke() when the oracle is POKE_AT_FRACTION of maxJumpBps away from the latch's anchor,
+//      so the anchor stays close (it only moves in a transaction that succeeds; settle and
+//      liquidate move it too). Liquidations go first and pokes last because all RPC requests
+//      share one budget (RPC_PER_MIN).
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
 import { readFileSync } from "node:fs";
@@ -43,7 +45,8 @@ const account = privateKeyToAccount(process.env.PRIVATE_KEY as Hex);
 // Every RPC request, reads and sends alike, waits for a slot: at most RPC_PER_MIN a minute, spread
 // evenly (HyperEVM's public RPC allows 100 a minute per IP).
 const RPC_PER_MIN = Number(process.env.RPC_PER_MIN ?? 90);
-const base = http(rpc)({});
+// no retries inside the transport: they would bypass the budget; a failed tick retries as a whole
+const base = http(rpc, { retryCount: 0 })({});
 let nextSlot = 0;
 const limited = custom({
   async request(args) {
@@ -133,6 +136,7 @@ const poolResult = (functionName: string, data: Hex) =>
 // poke only when the oracle has moved this share of maxJumpBps from the latch's anchor: enough to
 // keep the anchor close (settle and liquidate move it too), without a transaction per update
 const POKE_AT = Number(process.env.POKE_AT_FRACTION ?? 0.25);
+if (!(POKE_AT > 0 && POKE_AT < 1)) throw new Error(`POKE_AT_FRACTION must be in (0, 1), got ${process.env.POKE_AT_FRACTION}`);
 let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
 
 async function tick() {
@@ -157,7 +161,6 @@ async function tick() {
   const p = poolResult("getParams", rawParams);
   const [anchor] = poolResult("latch", rawLatch) as [bigint, bigint];
   const moved = anchor === 0n ? Infinity : Number(((oracle > anchor ? oracle - anchor : anchor - oracle) * 1_000_000n) / anchor) / 100;
-  if (moved >= Number(p.maxJumpBps) * POKE_AT) await send("poke");
 
   if (hoursFn) {
     // Outside the calendar the keeper cannot tell open from closed, so it keeps opens paused
@@ -174,21 +177,27 @@ async function tick() {
 
   const settleDelay = BigInt(p.settleDelay);
   const rows = ids.length ? await batch(ids.map((id) => poolCall("positions", [id]))) : [];
+  const liquidations: bigint[] = [];
+  const settlements: bigint[] = [];
   for (const [i, id] of ids.entries()) {
     // maintenance is the one stored with the position when it was opened, as the contract uses
     const [owner, long, leverage, margin, entry, requestedAt, closing, , , maintenanceBps] = poolResult("positions", rows[i]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {
-      await send("settle", [id]);
+      settlements.push(id);
       continue;
     }
     if (entry !== 0n) {
       const notional = margin * BigInt(leverage);
       const move = ((oracle - entry) * notional) / entry;
       const equity = margin + (long ? move : -move);
-      if (equity < (notional * BigInt(maintenanceBps)) / 10000n) await send("liquidate", [id]);
+      if (equity < (notional * BigInt(maintenanceBps)) / 10000n) liquidations.push(id);
     }
   }
+  // the order matters when the RPC budget is tight: what protects the pool first
+  for (const id of liquidations) await send("liquidate", [id]);
+  for (const id of settlements) await send("settle", [id]);
+  if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length === 0) await send("poke");
 }
 
 do {
