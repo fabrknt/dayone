@@ -64,10 +64,10 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 2 (f93543b) | CHANGES | share pricing reopened (first mint could skip the lock), cap raises blockable forever; fixed in 2558cd0, plus a reentrancy guard |
 | 3 (2558cd0) | CHANGES | share pricing reopened again (repeated wash pairs diluted the lock); redesigned in b92ae5a: shares priced at `shareValuation()`; maintenance stored per position |
 | 4 (b92ae5a) | CHANGES | round 3's three attacks closed (a five-pair wash nets −$18,644 after redeeming). New: a pending open's fee was outside the valuation, so a rebate minted before two high-fee requests settled redeemed $9,836 for a $3 loss; fixed in 58972d4 (`pendingOpens` in the valuation). Rebate starvation judged a fairness issue, not extraction |
-| 5 (58972d4) | in progress | check of the round 4 fix |
+| 5 (58972d4) | APPROVE | round 4 PoC closed (the attacker redeems $0.20 for a $3 loss); `pendingOpens` accounting checked on every path, including reverts in settle, pause and graduation; donations and rounding dust are never booked, so cannot be redeemed. No new findings |
 
 ## Not done
-Review round 5 to completion; testnet deployment (prepared: `docs/testnet.md`, needs a funded key
+Testnet deployment (prepared: `docs/testnet.md`, needs a funded key
 with big blocks on); market-hours calendars other than NYSE (KRX for xyz:SKHX and xyz:SMSN); audit.
 
 `forge test` (27 tests); `npm install && ./keeper/e2e.sh` (8 checks).

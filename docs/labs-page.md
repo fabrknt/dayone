@@ -24,8 +24,8 @@ Figures are as of 2026-10-17; update this file first when they change.
                     ("Safe caps", "Measured from the book, the safe settlement rate on a weekend was about $30K a minute for xyz:TSLA and $16K for xyz:SKHX, which then carried $376M of open interest."),
                 ]),
                 ("How it was checked", [
-                    "Four rounds of independent review. Each finding was first shown with a test that passed only because the flaw existed, then fixed, then the same test was run again.",
-                    "The reviews found and closed accounting and share-pricing flaws, among them a way for one trader's open loss to offset another's open profit, and ways to take value from earlier shareholders by trading against oneself. Shares are now priced at the most the pool can reach from the positions open at the time, and redeemed at a conservative value.",
+                    "Five rounds of independent review, the last of which found nothing new. Each finding was first shown with a test that passed only because the flaw existed, then fixed, then the same test was run again.",
+                    "The reviews found and closed accounting and share-pricing flaws, among them a way for one trader's open loss to offset another's open profit, ways to take value from earlier shareholders by trading against oneself, and a way to collect shares just before pending orders' fees reached the pool. Shares are now priced at the most the pool can reach from the positions open or requested at the time, and redeemed at a conservative value.",
                 ]),
                 ("Status", [
                     "Runs locally and on a local test chain; not deployed to testnet or mainnet, and not audited. It is not offered to traders.",
@@ -51,8 +51,8 @@ Figures are as of 2026-10-17; update this file first when they change.
                     ("安全な上限", "板の厚さから測ると、週末の安全な決済の速さは xyz:TSLA で1分あたり約3万ドル、xyz:SKHX で約1.6万ドルでした。そのとき xyz:SKHX には3.76億ドルの建玉がありました。"),
                 ]),
                 ("どう確かめたか", [
-                    "独立したレビューを4回受けました。指摘はまず「欠陥があるときだけ通るテスト」で示し、直したあと同じテストをもう一度流しています。",
-                    "会計と持分の値付けの欠陥を見つけて塞ぎました。ある人の含み損が別の人の含み益と相殺されてしまう問題や、自分を相手に売り買いして先にいた持分の保有者から価値を抜ける問題などです。いまは、持分はその時点の建玉から到達しうる最大の価値で値付けし、払い戻しは控えめな評価で行います。",
+                    "独立したレビューを5回受けました。最後の回では新たな指摘はありませんでした。指摘はまず「欠陥があるときだけ通るテスト」で示し、直したあと同じテストをもう一度流しています。",
+                    "会計と持分の値付けの欠陥を見つけて塞ぎました。ある人の含み損が別の人の含み益と相殺されてしまう問題や、自分を相手に売り買いして先にいた持分の保有者から価値を抜ける問題、約定待ちの注文の手数料を当て込んで持分を受け取る問題などです。いまは、持分はその時点の建玉と約定待ちの注文から到達しうる最大の価値で値付けし、払い戻しは控えめな評価で行います。",
                 ]),
                 ("いまの状態", [
                     "手元とローカルのテスト用チェーンだけで動かしています。testnet にも mainnet にも配置しておらず、監査も受けていません。トレーダー向けに提供していません。",
