@@ -102,7 +102,7 @@ contract LaunchPoolTest is Test {
         pool.settle(id);
         vm.warp(block.timestamp + 3);
         pool.settle(id);
-        (,,,, uint256 entry,,,,,) = pool.positions(id);
+        (,,,, uint256 entry,,,,,,) = pool.positions(id);
         assertEq(entry, 350e18);
     }
 
@@ -339,7 +339,7 @@ contract LaunchPoolTest is Test {
         setPx(353_500); // long +$1,000, short -$1,000: net zero, but the long is owed $1,000
         // pool holds $100 of open fees; owed = long ($1,000 profit + $10,000 margin) + short (0)
         assertEq(pool.equity(353.5e18), 0);
-        assertApproxEqAbs(pool.fairEquity(353.5e18), 100 * USDC, 1_000); // units rounding: < $0.001
+        assertEq(pool.shareValuation(), 20_100 * USDC); // $100 fees + both margins: the most it can reach
     }
 
     /// R1-F2: the first loser's shares are worth the rebate, not the whole pool.
@@ -421,8 +421,8 @@ contract LaunchPoolTest is Test {
 
     // ---- regressions for Codex round 2 ----
 
-    /// R2-N1: a wash whose losing leg closes first (pool worth less than the rebate) must not give
-    /// the washer every share. Each mint is capped at half the pool's fair value.
+    /// R2-N1: a wash whose losing leg closes first must not give the washer most of the shares:
+    /// the mint is priced at the most the pool can reach, which includes the open short's margin.
     function test_r2_firstMintCappedWhenPoolIsWorthLittle() public {
         uint256 l = open(alice, true, 10_000 * USDC, 10);
         uint256 sh = open(bob, false, 10_000 * USDC, 10);
@@ -430,7 +430,7 @@ contract LaunchPoolTest is Test {
         vm.warp(block.timestamp + 70);
         close(alice, l);
         uint256 locked = pool.shares(address(pool));
-        assertGe(locked, pool.shares(alice)); // the washer owns at most half
+        assertGe(locked, pool.shares(alice) * 10); // the washer's shares are a small fraction
         close(bob, sh);
         // even owning half, the pair cannot take back more than it paid in fees and haircut
         uint256 aliceShares = pool.shares(alice);

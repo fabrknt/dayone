@@ -61,6 +61,7 @@ contract LaunchPool {
         bool closing;
         uint16 feeBps; // fixed at request: the close fee is charged at this rate
         uint16 haircutBps; // fixed at request
+        uint16 maintenanceBps; // fixed at request: a later raise cannot liquidate this position
         uint256 openFee; // paid at request; refunded on cancel, pool income on settle
     }
 
@@ -250,7 +251,17 @@ contract LaunchPool {
         collateral.transferFrom(msg.sender, address(this), margin + openFee);
         id = nextId++;
         positions[id] = Position(
-            msg.sender, long, leverage, margin, 0, uint64(block.timestamp), false, P.feeBps, P.winHaircutBps, openFee
+            msg.sender,
+            long,
+            leverage,
+            margin,
+            0,
+            uint64(block.timestamp),
+            false,
+            P.feeBps,
+            P.winHaircutBps,
+            P.maintenanceBps,
+            openFee
         );
         _active.push(id);
         _activeIndex[id] = _active.length;
@@ -303,14 +314,14 @@ contract LaunchPool {
         uint256 price = _price();
         uint256 notional = p.margin * p.leverage;
         int256 posEquity = int256(p.margin) + _pnl(p, price);
-        if (posEquity >= int256(notional * _params.maintenanceBps / 10_000)) revert NotLiquidatable();
+        if (posEquity >= int256(notional * p.maintenanceBps / 10_000)) revert NotLiquidatable();
         _remove(id);
         _reduceOI(p.long, notional, p.margin, p.entry);
         uint256 left = posEquity > 0 ? uint256(posEquity) : 0;
         if (left != 0) collateral.transfer(p.owner, left);
         uint256 lost = p.margin - left;
         _income(lost);
-        _mintShares(p.owner, lost, price);
+        _mintShares(p.owner, lost);
         emit Liquidated(id, price, lost);
     }
 
@@ -352,17 +363,15 @@ contract LaunchPool {
         return owed >= poolBalance ? 0 : poolBalance - owed;
     }
 
-    /// The pool's value with open positions marked at `price`, losses included (exact up to
-    /// unit rounding of a few atoms per position). Used to price new shares: valuing the pool high means fewer shares, so a
-    /// mint can never dilute existing holders, whereas equity() is deliberately low (for
-    /// redemption) and would hand out cheap shares while the other side of a trade is open.
-    function fairEquity(uint256 price) public view returns (uint256) {
-        uint256 longValue = longUnits * price / 1e18;
-        uint256 shortValue = _mulUp(shortUnits, price);
-        // traders' net PnL = (longValue - longOI) + (shortOI - shortValue)
-        int256 tradersPnl = int256(longValue) - int256(longOI) + int256(shortOI) - int256(shortValue);
-        int256 v = int256(poolBalance) - tradersPnl;
-        return v > 0 ? uint256(v) : 0;
+    /// The most the pool can be worth from what is open now: balance, plus every open
+    /// position's margin (a position can lose at most its margin), minus what is owed to queued
+    /// winners. New shares are priced here, so nothing that happens to today's positions can
+    /// make them worth more than their rebate; only losses on positions opened later can, and
+    /// that income is meant for holders. Redemption uses equity(), the low end, so minting
+    /// high and redeeming low leaves nothing to arbitrage.
+    function shareValuation() public view returns (uint256) {
+        uint256 v = poolBalance + longMargin + shortMargin;
+        return v > totalDebt ? v - totalDebt : 0;
     }
 
     // ---- internals ----
@@ -373,6 +382,7 @@ contract LaunchPool {
         if (p.minNotional == 0 || p.minNotional > p.maxNotional) revert BadParams();
         if (p.capWindow < ExposureBudget.SLICES || p.capWindow % ExposureBudget.SLICES != 0) revert BadParams();
         if (p.maxLeverage == 0 || p.winHaircutBps > 10_000 || p.feeBps > 1_000) revert BadParams();
+        if (p.maintenanceBps == 0 || p.maintenanceBps > 10_000) revert BadParams();
     }
 
     function _price() internal returns (uint256 price) {
@@ -466,7 +476,7 @@ contract LaunchPool {
             if (loss > p.margin) loss = p.margin; // liquidation should have come first
             collateral.transfer(p.owner, p.margin - loss);
             _income(loss);
-            _mintShares(p.owner, loss > fee ? loss - fee : 0, price);
+            _mintShares(p.owner, loss > fee ? loss - fee : 0);
         }
         emit Closed(id, price, pnl, paid, queued);
     }
@@ -485,28 +495,23 @@ contract LaunchPool {
         poolBalance += amount;
     }
 
-    /// Shares worth `rebateBps` of the loss at the pool's fair value per share.
+    /// Shares worth `rebateBps` of the loss, priced at shareValuation().
     ///
     /// The first mint also creates locked shares (held by this contract, never redeemable) for
-    /// the rest of the value, so the first loser's shares are worth the rebate and no more.
-    function _mintShares(address to, uint256 loss, uint256 price) internal {
-        uint256 eq = fairEquity(price);
+    /// the rest of the valuation, so the first loser's shares are worth the rebate and no more.
+    function _mintShares(address to, uint256 loss) internal {
         uint256 value = loss * _params.rebateBps / 10_000;
-        // at most half the pool's value per mint: when the pool is worth less than the rebate
-        // (the other leg of a wash still open), the rebate shrinks instead of the first minter
-        // ending up with every share
-        if (value > eq / 2) value = eq / 2;
         if (value == 0) return;
+        // the loss is already in poolBalance, so v >= loss > value unless winners are queued
+        uint256 v = shareValuation();
+        if (v <= value) return; // everything is owed to queued winners: no rebate
         uint256 s_;
         uint256 locked;
         if (totalShares == 0) {
-            // 1 share = 1 collateral unit at the start; locked >= s_ by the cap above
-            s_ = value;
-            locked = eq - value;
+            s_ = value; // 1 share = 1 collateral unit at the start
+            locked = v - value;
         } else {
-            // value is already inside eq (the loss was just added), so price shares off eq - value;
-            // eq - value >= eq / 2 > 0 by the cap above
-            s_ = value * totalShares / (eq - value);
+            s_ = value * totalShares / (v - value);
         }
         shares[to] += s_;
         if (locked != 0) shares[address(this)] += locked;
