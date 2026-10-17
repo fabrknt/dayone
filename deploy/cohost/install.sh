@@ -88,8 +88,11 @@ fi
 if [ -e "$MARKER" ]; then
   [ "$(stat -c %u "$MARKER")" = 0 ] || die "$MARKER is not root-owned"
   # a committed install is complete; anything else is refused rather than half-rolled-back
-  [ -d "$(readlink -f "$BASE/current" 2>/dev/null)" ] && [ -f "$ETC/key" ] && [ -f "$UNIT" ] \
-    || die "the existing install is incomplete (current, key or unit missing); repair it by hand"
+  # (current a symlink to a release under releases/, key and unit plain files, not symlinks)
+  CURT=$(readlink -f "$BASE/current" 2>/dev/null || true)
+  [ -L "$BASE/current" ] && [ -d "$CURT" ] && [ "${CURT%/*}" = "$BASE/releases" ] \
+    && [ -f "$ETC/key" ] && [ ! -L "$ETC/key" ] && [ -f "$UNIT" ] && [ ! -L "$UNIT" ] \
+    || die "the existing install is incomplete or altered (current, key or unit); repair it by hand"
 else
   for p in "$BASE" "$ETC" "$UNIT"; do exists "$p" && die "$p exists but was not made by this script"; done
   id "$NAME" >/dev/null 2>&1 && die "user $NAME exists but was not made by this script"
