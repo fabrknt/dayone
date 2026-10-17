@@ -14,8 +14,8 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
 ## Steps (the key holder runs 1, 2 and 3)
 1. A fresh key with testnet HYPE on HyperEVM for gas (send from HyperCore testnet spot to the
    EVM, or a faucet). About 6.4M gas in all at 0.2 gwei.
-2. Turn on big blocks for that address. LaunchPool's initcode is 21.5 KB (about 4.5M gas), over
-   the 2M small-block limit. This is a HyperCore action signed by the same key:
+2. Turn on big blocks for that address. LaunchPool's initcode is 18 KB with the optimizer (about
+   3.6M gas), over the 2M small-block limit. This is a HyperCore action signed by the same key:
    `{"type": "evmUserModify", "usingBigBlocks": true}` (hyperliquid-python-sdk:
    `Exchange.use_big_block(True)`). It can be turned off again after deploying.
 3. `forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm --broadcast --private-key $KEY`
