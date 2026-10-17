@@ -2,6 +2,15 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
+## Current deployment (2026-10-17)
+- Pool `0x372Efd44DD50FBc0b070A0729756659f12539040`, mock USDC `0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`
+  (xyz:TSLA, the testnet defaults below). Deploying cost 0.00042 HYPE at 0.1 gwei.
+- First run: `poke` with the real precompiles, then a $200 long requested and settled by the
+  keeper at 373.42, the same oracle the HL API reported. The keeper runs with
+  `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
+- Page: `?net=testnet&pool=0x372Efd44DD50FBc0b070A0729756659f12539040&usdc=0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`.
+- The keeper runs on a local machine for now, so it stops when that machine does.
+
 ## Market
 Default: testnet xyz:TSLA. xyz is dex 65 on testnet (dex 1 on mainnet), so:
 - `0x806` / `0x807` / `0x80a` take `650001`
@@ -17,11 +26,15 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
 2. Turn on big blocks for that address. LaunchPool's initcode is 18.5 KB with the optimizer (about
    3.7M gas), over the 2M small-block limit. This is a HyperCore action signed by the same key:
    `{"type": "evmUserModify", "usingBigBlocks": true}` (hyperliquid-python-sdk:
-   `Exchange.use_big_block(True)`). It can be turned off again after deploying.
+   `Exchange.use_big_blocks(True)`; or `script/big_blocks.py on`, which skips the SDK's metadata
+   load because the SDK fails to parse testnet's spot list). Turn it off after deploying
+   (`script/big_blocks.py off`): while on, every EVM transaction from the address waits for a big
+   block, about one a minute.
 3. `forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm --broadcast --private-key $KEY`
    It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
    position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K.
-4. Mint mock USDC to a trader (`cast send $USDC "mint(address,uint256)" …`), approve the pool, and
+4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
+   `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
    run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
    `MARKET_HOURS=nyse` pauses new positions while NYSE is closed (the operator key is needed for
    that); use `krx` for xyz:SKHX or xyz:SMSN.

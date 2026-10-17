@@ -1,6 +1,7 @@
 # Day One — Fabrknt Labs
 
 Private. Research and a reference implementation, not a product. Not offered to traders.
+Deployed on HyperEVM testnet against xyz:TSLA (2026-10-17, `docs/testnet.md`).
 It studies how to make a newly listed HIP-3 perp tradable from day one without inviting the attacks
 a thin book invites: initial liquidity, price anomalies, exposure caps and stop conditions.
 Part of Fabrknt for HIP-3 (fabrknt.com/hip3/labs/day-one); it moves forward only when an operator
@@ -57,7 +58,8 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   `cd web && npm install && npm run dev`. anvil's key 0 is the operator and keeper, key 1 the
   page's dev wallet, key 2 moves the mock price (separate keys, so they never race on a nonce).
   `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.
-- Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet.
+- Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet. The current deployment's
+  addresses are in `docs/testnet.md`.
 - Phone width: under 480 px the positions table drops its id and entry columns so Close and
   Cancel stay in view, and inputs are 16 px so iOS Safari does not zoom (checked at 390 px).
 
@@ -74,7 +76,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 5 (58972d4) | APPROVE | round 4 PoC closed (the attacker redeems $0.20 for a $3 loss); `pendingOpens` accounting checked on every path, including reverts in settle, pause and graduation; donations and rounding dust are never booked, so cannot be redeemed. No new findings |
 
 ## Not done
-Testnet deployment (prepared: `docs/testnet.md`, needs a funded key
-with big blocks on); calendars beyond 2026 and other exchanges; audit.
+A keeper on a host that stays up (the testnet keeper runs on a local machine); calendars beyond
+2026 and other exchanges; audit; mainnet.
 
 `forge test` (30 tests); `npm install && ./keeper/e2e.sh` (10 checks); `node --test keeper/krx.test.mjs`.
