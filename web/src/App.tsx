@@ -179,7 +179,7 @@ export default function App() {
                 <span className="mono">{me ? usd(me.usdc) : "—"} USDC</span>
               </div>
               <button className="ghost" disabled={!!busy} onClick={() => tx("Minting", cfg.usdc, usdcAbi, "mint", [address, 10_000n * USDC])}>
-                Get 10,000 test USDC
+                {busy === "Minting" ? "Minting…" : "Get 10,000 test USDC"}
               </button>
               <div className="seg">
                 <button className={long ? "on long" : ""} onClick={() => setLong(true)}>Long</button>
@@ -193,7 +193,7 @@ export default function App() {
                 <span>Max size</span><span className="mono">{pool ? usd(pool.maxNotional, 0) : "—"}</span>
               </div>
               <button className="primary" disabled={!!busy || status !== "live" || marginUnits === 0n} onClick={open}>
-                {busy ?? (long ? "Open long" : "Open short")}
+                {busy ? `${busy}…` : long ? "Open long" : "Open short"}
               </button>
               <p className="fine">
                 Two steps: you request now, and it settles at the oracle once {String(pool?.settleDelay ?? 3n)} s have passed.
@@ -255,6 +255,16 @@ export default function App() {
           </table>
         </section>
       )}
+
+      <section className="card how">
+        <h2>How it works</h2>
+        <ol>
+          <li><b>New listings have thin books.</b> Day One takes the other side of your trade while the HL book fills up, and steps back once it is deep enough.</li>
+          <li><b>Fills at the oracle, two steps.</b> You request, and it fills at the next price once {String(pool?.settleDelay ?? 3n)} s have passed, so nobody can trade on a price they already know.</li>
+          <li><b>It stops rather than fill at a bad price.</b> If the oracle jumps, disagrees with HL's book or with an outside price, every fill and liquidation waits.</li>
+          <li><b>Losses fund the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 20}% of what they lost; winners give {pool ? pool.winHaircutBps / 100 : 30}% of profit to the pool. Profit the pool can't pay yet is queued and paid from later losses.</li>
+        </ol>
+      </section>
 
       <footer className="fine">
         Prices are Hyperliquid's oracle for this HIP-3 market, read on HyperEVM and checked against the book, an independent
