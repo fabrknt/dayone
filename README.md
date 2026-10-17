@@ -16,8 +16,9 @@ market's deployer while the book is thin, and retired once it is deep enough.
   enforced, which is what makes washing between two own accounts lose money.
 - **Shares priced high, redeemed low.** New shares are priced at `shareValuation()` = balance +
   open positions' margin + pending opens' margin and fee − queued debt, the most today's
-  positions and requests can bring in (each loses at most its margin). Redemption pays out of `equity()`, which reserves, per side, that side's PnL
-  plus its margin, so open losses never offset open winners. The first mint locks the rest of the
+  positions and requests can bring in (each loses at most its margin). Redemption pays out of
+  `equity()`, which reserves, per side, that side's PnL plus its margin, so open losses never
+  offset open winners. The first mint locks the rest of the
   valuation in shares the contract holds, so no early holder owns the pool.
 - **Settlement.** Two-step: request, then anyone settles after `settleDelay` at HL's oracle read
   through hl-price-guard's `HLPriceGuard` (bounds, an independent reference, a jump latch). Any
@@ -36,8 +37,8 @@ market's deployer while the book is thin, and retired once it is deep enough.
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (27 tests, including one regression per review
-  finding: `test_r1_*`, `test_r2_*`)
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (30 tests, including regressions for review
+  findings: `test_r1_*` to `test_r4_*`)
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
@@ -45,15 +46,20 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   in that repo; it does not depend on Day One.
 - `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
-  (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN, 2026 calendar with the CSAT shift).
+  (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
+  the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
+  outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
 
 ## Web UI
 `web/`: trade, pool and positions in one page (Vite + React + viem).
 - Local: `./keeper/dev.sh` (anvil, mock precompiles, pool, keeper, a moving price), then
-  `cd web && npm install && npm run dev`. The dev wallet is anvil's key 1.
+  `cd web && npm install && npm run dev`. anvil's key 0 is the operator and keeper, key 1 the
+  page's dev wallet, key 2 moves the mock price (separate keys, so they never race on a nonce).
   `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.
 - Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet.
+- Phone width: under 480 px the positions table drops its id and entry columns so Close and
+  Cancel stay in view, and inputs are 16 px so iOS Safari does not zoom (checked at 390 px).
 
 ## Review
 Codex reviews each change that moves money, and proves each finding with a PoC test before it is
@@ -71,4 +77,4 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 Testnet deployment (prepared: `docs/testnet.md`, needs a funded key
 with big blocks on); calendars beyond 2026 and other exchanges; audit.
 
-`forge test` (27 tests); `npm install && ./keeper/e2e.sh` (10 checks); `node --test keeper/krx.test.mjs`.
+`forge test` (30 tests); `npm install && ./keeper/e2e.sh` (10 checks); `node --test keeper/krx.test.mjs`.

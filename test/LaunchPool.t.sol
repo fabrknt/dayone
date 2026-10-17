@@ -468,6 +468,78 @@ contract LaunchPoolTest is Test {
         pool.graduate();
     }
 
+    // ---- regressions for Codex round 3 (Codex's reruns, kept as written) ----
+
+    function test_r3_repeatedCappedMintsNoLongerDrainReserve() public {
+        address victim = address(0xCA11E);
+        usdc.mint(victim, 1_000_000 * USDC);
+        vm.prank(victim);
+        usdc.approve(address(pool), type(uint256).max);
+        uint256 victimLong = open(victim, true, 10_000 * USDC, 10);
+        setPx(346_500);
+        close(victim, victimLong);
+        setPx(350_000);
+        vm.warp(block.timestamp + 70);
+
+        uint256 pairStart = usdc.balanceOf(alice) + usdc.balanceOf(bob);
+        uint256[5] memory longs;
+        uint256[5] memory shorts;
+        for (uint256 i; i < 5; ++i) {
+            longs[i] = open(alice, true, 25_000 * USDC, 20);
+            shorts[i] = open(bob, false, 25_000 * USDC, 20);
+            if (i != 4) vm.warp(block.timestamp + 70);
+        }
+        setPx(343_000);
+        for (uint256 i; i < 5; ++i) {
+            close(alice, longs[i]);
+            if (i != 4) vm.warp(block.timestamp + 70);
+        }
+        emit log_named_uint("alice share bps after five losing closes", pool.shares(alice) * 10_000 / pool.totalShares());
+        assertLt(pool.shares(alice) * 100, pool.totalShares() * 10);
+
+        for (uint256 i; i < 5; ++i) {
+            close(bob, shorts[i]);
+            if (i != 4) vm.warp(block.timestamp + 70);
+        }
+        uint256 pairBalance = usdc.balanceOf(alice) + usdc.balanceOf(bob);
+        emit log_named_uint("queued winner debt", pool.totalDebt());
+        emit log_named_int("wash pair net before blocked redemption", int256(pairBalance) - int256(pairStart));
+        uint256 aliceShares = pool.shares(alice);
+        vm.prank(alice);
+        uint256 got = pool.redeem(aliceShares);
+        emit log_named_uint("alice redeemed", got);
+        int256 net = int256(usdc.balanceOf(alice) + usdc.balanceOf(bob)) - int256(pairStart);
+        emit log_named_int("wash pair net after redeeming everything", net);
+        assertLt(net, 0);
+    }
+
+    function test_r3_maintenanceRaiseCannotLiquidateExistingPosition() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        LaunchPool.Params memory p = defaultParams();
+        p.maintenanceBps = 5_000;
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+        vm.expectRevert(LaunchPool.NotLiquidatable.selector);
+        pool.liquidate(id);
+        (address owner,,,,,,,,,,) = pool.positions(id);
+        assertEq(owner, alice);
+        emit log_string("existing 10x position survives delayed maintenance raise");
+    }
+
+    function test_r3_firstMintCreatesLockAtShareValuation() public {
+        uint256 losingLong = open(alice, true, 100_000 * USDC, 1);
+        open(bob, false, 100_000 * USDC, 1);
+        setPx(346_500);
+        close(alice, losingLong);
+        emit log_named_uint("share valuation", pool.shareValuation());
+        emit log_named_uint("alice shares", pool.shares(alice));
+        emit log_named_uint("locked shares", pool.shares(address(pool)));
+        assertEq(pool.shares(alice), 200 * USDC);
+        assertGt(pool.shares(address(pool)), 0);
+        assertEq(pool.totalShares(), pool.shareValuation());
+    }
+
     // ---- regressions for Codex round 4 ----
 
     /// R4-F1: a pending open's fee is already in the contract and becomes income at settle, so a

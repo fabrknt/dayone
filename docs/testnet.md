@@ -22,7 +22,10 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
    It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
    position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K.
 4. Mint mock USDC to a trader (`cast send $USDC "mint(address,uint256)" …`), approve the pool, and
-   run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY node keeper/keeper.ts`.
+   run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
+   `MARKET_HOURS=nyse` pauses new positions while NYSE is closed (the operator key is needed for
+   that); use `krx` for xyz:SKHX or xyz:SMSN.
+5. Open the page with `?net=testnet&pool=$POOL&usdc=$USDC` and a browser wallet on chain 998.
 
 What testnet adds over `keeper/e2e.sh`: the real precompiles and a deployer's real oracle
 updates, instead of mocks.
