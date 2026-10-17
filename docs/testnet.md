@@ -13,10 +13,20 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
   checksum-verified Node), the key in `/etc/dayone-keeper` readable only by that user, one unit
-  capped at 200 MB and a quarter of a CPU). It refuses to run over anything it did not make, and
-  an upgrade switches releases only once the new one is complete. Checked in an Amazon Linux 2023
-  arm64 container with systemd: refuses an existing user, installs, upgrades, survives a corrupt
-  bundle, pokes testnet.
+  capped at 200 MB and a quarter of a CPU).
+  - It refuses to run over anything it did not make (dangling symlinks count), and refuses a
+    committed install that is incomplete or altered.
+  - The marker is written only after the first install's service stays up for 15 s; a failed first
+    install removes exactly what it created.
+  - An upgrade stages a release, then switches key, release link and unit; any failure from there,
+    or a service that does not stay up, restores all three and restarts the previous one.
+  - Runs are serialised with a lock. Holding it, the uploaded key is moved to a 0600 copy in
+    `/run` and removed; the copy goes on every exit. The installed key itself is refused as input.
+  - Checked in an Amazon Linux 2023 arm64 container with systemd, 12 scenarios (the list is in
+    the Codex round 6 review notes).
+  Run, from a machine with SSH to the host: `./deploy/cohost/bundle.sh`, copy
+  `dist/dayone-keeper.tgz`, `deploy/cohost/install.sh` and the key file over, then
+  `sudo bash install.sh dayone-keeper.tgz KEYFILE` (upgrades: omit KEYFILE).
 - Rate limit: the public testnet RPC rejected about one tick in six ("Request exceeds defined
   limit") when the keeper made 7 reads a tick. It now reads through Multicall3 (1 call a tick, 2
   with positions) and the hosted keeper ticks every 2 s (`TICK_MS`): no failures in 90 s.

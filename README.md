@@ -76,9 +76,13 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 3 (2558cd0) | CHANGES | share pricing reopened again (repeated wash pairs diluted the lock); redesigned in b92ae5a: shares priced at `shareValuation()`; maintenance stored per position |
 | 4 (b92ae5a) | CHANGES | round 3's three attacks closed (a five-pair wash nets −$18,644 after redeeming). New: a pending open's fee was outside the valuation, so a rebate minted before two high-fee requests settled redeemed $9,836 for a $3 loss; fixed in 58972d4 (`pendingOpens` in the valuation). Rebate starvation judged a fairness issue, not extraction |
 | 5 (58972d4) | APPROVE | round 4 PoC closed (the attacker redeems $0.20 for a $3 loss); `pendingOpens` accounting checked on every path, including reverts in settle, pause and graduation; donations and rounding dust are never booked, so cannot be redeemed. No new findings |
+| 6 (adbeca4) | CHANGES | keeper and host scripts, no contract change. An expired market-hours calendar aborted the whole tick (settle and liquidate too); a 60 s params cache delayed settlements; install.sh could take over another project's paths, had no rollback and trusted a shared Node. Fixed in 2dbae7c |
+| 6b–6e | CHANGES | install.sh only, narrowing each round: marker written before a healthy start, no rollback on failures after the switch, the live key accepted as input, an incomplete install accepted. 6d also caught that 24269ec's message described a key handoff that was not in the code (corrected in ad079cf). Fixed in 56a22df, 24269ec, ad079cf, 6ef0210 |
+| 6f (6ef0210) | in progress | final pass on install.sh |
 
 ## Not done
-A keeper on a host that stays up (the testnet keeper runs on a local machine); calendars beyond
-2026 and other exchanges; audit; mainnet.
+Moving the testnet keeper to an always-on host with `deploy/cohost/` once round 6 closes (it
+runs on a local machine for now); the win-haircut curve (branch `feat/haircut-curve`, to review
+as round 7); calendars beyond 2026 and other exchanges; audit; mainnet.
 
 `forge test` (30 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.
