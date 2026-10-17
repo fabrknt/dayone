@@ -4,3 +4,6 @@ cache/
 node_modules/
 keeper/.local.json
 broadcast/
+web/node_modules/
+web/dist/
+web/public/local.json

@@ -23,6 +23,13 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   `MARKET_HOURS=nyse` it pauses new positions while NYSE is closed (`keeper/campana.mjs`).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
 
+## Web UI
+`web/`: trade, pool and positions in one page (Vite + React + viem).
+- Local: `./keeper/dev.sh` (anvil, mock precompiles, pool, keeper, a moving price), then
+  `cd web && npm install && npm run dev`. The dev wallet is anvil's key 1.
+  `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.
+- Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet.
+
 ## Not done
 Testnet deployment (prepared: docs/testnet.md, needs a funded key with big blocks on), market-hours calendars other than NYSE (KRX for xyz:SKHX and xyz:SMSN), audit.
 
