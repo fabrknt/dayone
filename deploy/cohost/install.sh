@@ -13,7 +13,8 @@
 # - An upgrade stages a new release, then switches key, release link and unit. If anything fails
 #   from the switch on, or the service does not stay up, all three are put back and the previous
 #   service restarted.
-# - Installs are serialised with a lock. The uploaded key file is removed on every exit.
+# - Installs are serialised with a lock. Once a run holds it, the uploaded key file is moved to
+#   a private copy in /run and removed; the copy is removed on every exit.
 set -euo pipefail
 umask 022
 BUNDLE=${1:?bundle}
@@ -33,7 +34,7 @@ exists() { [ -e "$1" ] || [ -L "$1" ]; } # a dangling symlink counts
 
 # State for cleanup: what this run created (first install) or switched (upgrade).
 FIRST=0 CREATED_USER=0 CREATED_BASE=0 CREATED_ETC=0 CREATED_UNIT=0
-SWITCHING=0 PREV= REL= STAGE= KEY_REPLACED=0 UNIT_SAVED=0
+SWITCHING=0 PREV= REL= STAGE= KEY_REPLACED=0 UNIT_SAVED=0 KEYTMP=
 rollback() {
   [ -n "$PREV" ] && { ln -sfn "$PREV" "$BASE/current.new"; mv -T "$BASE/current.new" "$BASE/current"; }
   [ $KEY_REPLACED = 1 ] && [ -e "$ETC/key.prev" ] && mv -f "$ETC/key.prev" "$ETC/key"
@@ -57,8 +58,8 @@ cleanup() {
     echo "install.sh: upgrade failed; restored ${PREV:-the previous state}" >&2
   fi
   [ $rc -eq 0 ] && rm -f "$UNIT.prev" "$ETC/key.prev"
-  # the uploaded key never stays where it was uploaded, whatever happened
-  [ -n "$KEYFILE" ] && [ -e "$KEYFILE" ] && { shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"; }
+  # the private copy of the uploaded key never outlives the run
+  [ -n "$KEYTMP" ] && { shred -u "$KEYTMP" 2>/dev/null || rm -f "$KEYTMP"; }
 }
 trap cleanup EXIT
 
@@ -74,11 +75,21 @@ fi
 
 exec 9>/run/$NAME.install.lock
 flock -n 9 || die "another install is running"
+# Only now, holding the lock, take the upload: copy it to a 0600 file in /run that this run
+# tracks, then remove the upload. A run refused before this point leaves the upload untouched.
+if [ -n "$KEYFILE" ]; then
+  KEYTMP=$(umask 077; mktemp /run/$NAME.key.XXXXXX)
+  cat "$KEYFILE" > "$KEYTMP"
+  shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"
+  KEYFILE=$KEYTMP
+fi
 
 # 1. Only proceed on a clean host or on our own committed install.
 if [ -e "$MARKER" ]; then
   [ "$(stat -c %u "$MARKER")" = 0 ] || die "$MARKER is not root-owned"
-  [ -e "$ETC/key" ] || [ -n "$KEYFILE" ] || die "no key installed; pass the key file"
+  # a committed install is complete; anything else is refused rather than half-rolled-back
+  [ -d "$(readlink -f "$BASE/current" 2>/dev/null)" ] && [ -f "$ETC/key" ] && [ -f "$UNIT" ] \
+    || die "the existing install is incomplete (current, key or unit missing); repair it by hand"
 else
   for p in "$BASE" "$ETC" "$UNIT"; do exists "$p" && die "$p exists but was not made by this script"; done
   id "$NAME" >/dev/null 2>&1 && die "user $NAME exists but was not made by this script"
@@ -139,7 +150,10 @@ if [ -n "$KEYFILE" ]; then
 fi
 ln -sfn "$REL" "$BASE/current.new"
 mv -T "$BASE/current.new" "$BASE/current"
-[ -e "$UNIT" ] && cp -p "$UNIT" "$UNIT.prev" && UNIT_SAVED=1
+if [ -e "$UNIT" ]; then
+  cp -p "$UNIT" "$UNIT.prev" || die "could not save the current unit"
+  UNIT_SAVED=1
+fi
 cat > "$UNIT.new" <<UNIT
 [Unit]
 Description=Day One keeper (HyperEVM testnet)
