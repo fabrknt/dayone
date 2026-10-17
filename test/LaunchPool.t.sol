@@ -467,4 +467,56 @@ contract LaunchPoolTest is Test {
         vm.expectRevert(LaunchPool.NotOperator.selector);
         pool.graduate();
     }
+
+    // ---- regressions for Codex round 4 ----
+
+    /// R4-F1: a pending open's fee is already in the contract and becomes income at settle, so a
+    /// rebate minted before that settle must be priced with it (Codex PoC, adapted).
+    function test_r4_pendingOpenFeeCountsInValuation() public {
+        uint256 attackerLong = open(alice, true, 5 * USDC, 20);
+        LaunchPool.Params memory p = defaultParams();
+        p.feeBps = 1_000; // the highest fee _validate allows
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+
+        address v1 = address(0xBEEF);
+        address v2 = address(0xCAFE);
+        for (uint256 i; i < 2; ++i) {
+            address v = i == 0 ? v1 : v2;
+            usdc.mint(v, 1_000_000 * USDC);
+            vm.prank(v);
+            usdc.approve(address(pool), type(uint256).max);
+        }
+        vm.prank(v1);
+        uint256 p1 = pool.requestOpen(false, 25_000 * USDC, 20); // $50K fee, pending
+        vm.prank(v2);
+        uint256 p2 = pool.requestOpen(true, 25_000 * USDC, 20); // opposite side
+        assertEq(pool.pendingOpens(), 2 * 75_000 * USDC);
+
+        setPx(343_000);
+        pool.poke();
+        setPx(339_500);
+        pool.liquidate(attackerLong); // $3 loss, $0.60 rebate priced with the pending fees
+        vm.warp(block.timestamp + 3);
+        pool.settle(p1);
+        pool.settle(p2);
+        assertEq(pool.pendingOpens(), 0);
+        uint256 aliceShares = pool.shares(alice);
+        vm.prank(alice);
+        uint256 paid = pool.redeem(aliceShares);
+        assertLt(paid, 3 * USDC); // less than the $3 lost; was $9,836 before the fix
+    }
+
+    /// R4-F1: cancelling a pending open takes its margin and fee back out of the valuation.
+    function test_r4_cancelOpenReleasesPending() public {
+        uint256 v0 = pool.shareValuation();
+        vm.prank(alice);
+        uint256 id = pool.requestOpen(true, 1_000 * USDC, 10);
+        assertEq(pool.shareValuation(), v0 + 1_005 * USDC);
+        vm.prank(alice);
+        pool.cancelOpen(id);
+        assertEq(pool.shareValuation(), v0);
+        assertEq(pool.pendingOpens(), 0);
+    }
 }

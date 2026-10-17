@@ -94,6 +94,7 @@ contract LaunchPool {
     Debt[] public debts;
     uint256 public debtHead;
     uint256 public totalDebt;
+    uint256 public pendingOpens; // margin + open fee held for requested, unsettled opens
 
     mapping(uint256 => Position) public positions;
     uint256 public nextId = 1;
@@ -249,6 +250,7 @@ contract LaunchPool {
         // the open fee is collected on top of margin, so notional stays margin * leverage
         uint256 openFee = notional * P.feeBps / 10_000;
         collateral.transferFrom(msg.sender, address(this), margin + openFee);
+        pendingOpens += margin + openFee;
         id = nextId++;
         positions[id] = Position(
             msg.sender,
@@ -274,6 +276,7 @@ contract LaunchPool {
         if (p.owner != msg.sender) revert NotOwner();
         if (p.entry != 0) revert BadRequest();
         _remove(id);
+        pendingOpens -= p.margin + p.openFee;
         collateral.transfer(msg.sender, p.margin + p.openFee);
     }
 
@@ -300,6 +303,7 @@ contract LaunchPool {
             uint256 net = _net();
             if (net > _params.maxNetNotional) revert NetExposureExceeded(net, _params.maxNetNotional);
             p.entry = price; // state before the token transfers in _income
+            pendingOpens -= p.margin + p.openFee;
             _income(p.openFee);
             emit Opened(id, price);
         } else {
@@ -363,14 +367,14 @@ contract LaunchPool {
         return owed >= poolBalance ? 0 : poolBalance - owed;
     }
 
-    /// The most the pool can be worth from what is open now: balance, plus every open
-    /// position's margin (a position can lose at most its margin), minus what is owed to queued
-    /// winners. New shares are priced here, so nothing that happens to today's positions can
+    /// The most the pool can be worth from what is open or requested now: balance, plus every
+    /// open position's margin (a position can lose at most its margin), plus each pending open's
+    /// margin and fee (the fee becomes income at settle), minus what is owed to queued winners. New shares are priced here, so nothing that happens to today's positions can
     /// make them worth more than their rebate; only losses on positions opened later can, and
     /// that income is meant for holders. Redemption uses equity(), the low end, so minting
     /// high and redeeming low leaves nothing to arbitrage.
     function shareValuation() public view returns (uint256) {
-        uint256 v = poolBalance + longMargin + shortMargin;
+        uint256 v = poolBalance + longMargin + shortMargin + pendingOpens;
         return v > totalDebt ? v - totalDebt : 0;
     }
 
