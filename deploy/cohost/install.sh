@@ -1,7 +1,8 @@
 #!/bin/bash
 # Install or upgrade the Day One keeper as its own systemd service on an existing host. Run as
-# root with the bundle (from bundle.sh) and, on first install or to replace it, the key file:
-#   sudo bash install.sh BUNDLE.tgz [KEYFILE]
+# root with the bundle and the SHA-256 that bundle.sh printed for it, and, on first install or to
+# replace it, the key file:
+#   sudo bash install.sh BUNDLE.tgz SHA256 [KEYFILE]
 #
 # Everything it creates is namespaced dayone-keeper and nothing else on the host is touched:
 #   user dayone-keeper (no login), /opt/dayone-keeper (root-owned: releases, Node, a marker),
@@ -14,11 +15,13 @@
 #   from the switch on, or the service does not stay up, all three are put back and the previous
 #   service restarted.
 # - Installs are serialised with a lock. Once a run holds it, the uploaded key file is moved to
-#   a private copy in /run and removed; the copy is removed on every exit.
+#   a private copy in /run and the upload unlinked; the copy is removed on every exit.
+# - The bundle must match the SHA-256 given; npm runs with --ignore-scripts.
 set -euo pipefail
 umask 022
 BUNDLE=${1:?bundle}
-KEYFILE=${2:-}
+BUNDLE_SHA256=${2:?sha256 of the bundle, as bundle.sh printed it}
+KEYFILE=${3:-}
 NAME=dayone-keeper
 BASE=/opt/$NAME
 ETC=/etc/$NAME
@@ -66,6 +69,8 @@ trap cleanup EXIT
 [ "$(id -u)" = 0 ] || die "run as root"
 if [ -n "$KEYFILE" ]; then
   [ -f "$KEYFILE" ] && [ -s "$KEYFILE" ] || die "key file $KEYFILE is empty or missing"
+  # a plain file with one name, so removing the upload can never touch another file
+  [ ! -L "$KEYFILE" ] && [ "$(stat -c %h "$KEYFILE")" = 1 ] || { KEYFILE=; die "the key file must be a plain file, not a link"; }
   # never accept the live key (or an alias of it): it would be replaced by itself, then shredded
   case "$(readlink -f "$KEYFILE")" in "$ETC"/*) KEYFILE=; die "pass an uploaded copy, not the installed key" ;; esac
   if [ -e "$ETC/key" ] && [ "$(stat -c %d:%i "$KEYFILE")" = "$(stat -c %d:%i "$ETC/key")" ]; then
@@ -75,14 +80,6 @@ fi
 
 exec 9>/run/$NAME.install.lock
 flock -n 9 || die "another install is running"
-# Only now, holding the lock, take the upload: copy it to a 0600 file in /run that this run
-# tracks, then remove the upload. A run refused before this point leaves the upload untouched.
-if [ -n "$KEYFILE" ]; then
-  KEYTMP=$(umask 077; mktemp /run/$NAME.key.XXXXXX)
-  cat "$KEYFILE" > "$KEYTMP"
-  shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"
-  KEYFILE=$KEYTMP
-fi
 
 # 1. Only proceed on a clean host or on our own committed install.
 if [ -e "$MARKER" ]; then
@@ -100,6 +97,15 @@ else
   FIRST=1
 fi
 ARCH=$(uname -m); case $ARCH in aarch64) ARCH=arm64 ;; x86_64) ARCH=x64 ;; *) die "unsupported arch $ARCH" ;; esac
+echo "$BUNDLE_SHA256  $BUNDLE" | sha256sum -c --quiet - || die "bundle does not match the SHA-256 given"
+# Only now, holding the lock and past every refusal, take the upload: copy it to a 0600 file in /run that this run
+# tracks, then remove the upload. A run refused before this point leaves the upload untouched.
+if [ -n "$KEYFILE" ]; then
+  KEYTMP=$(umask 077; mktemp /run/$NAME.key.XXXXXX)
+  cat "$KEYFILE" > "$KEYTMP"
+  rm -f -- "$KEYFILE" # unlink the upload; the private copy is the one shredded
+  KEYFILE=$KEYTMP
+fi
 
 if [ $FIRST = 1 ]; then
   useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin $NAME; CREATED_USER=1
@@ -123,7 +129,8 @@ fi
 STAGE=$(mktemp -d "$BASE/releases/.stage.XXXXXX")
 tar -xzf "$BUNDLE" -C "$STAGE" --no-same-owner
 [ -f "$STAGE/keeper/keeper.ts" ] && [ -f "$STAGE/keeper.env" ] && [ -f "$STAGE/out/LaunchPool.sol/LaunchPool.json" ] || die "bundle is incomplete"
-(cd "$STAGE" && HOME=/nonexistent npm_config_cache="$STAGE/.npm" PATH="$NODEDIR/bin:$PATH" npm ci --omit=dev --no-audit --no-fund --silent)
+# --ignore-scripts: no package code runs as root at install; package-lock pins every tarball's hash
+(cd "$STAGE" && HOME=/nonexistent npm_config_cache="$STAGE/.npm" PATH="$NODEDIR/bin:$PATH" npm ci --omit=dev --ignore-scripts --no-audit --no-fund --silent)
 rm -rf "$STAGE/.npm"
 cat > "$STAGE/run.sh" <<SH
 #!/bin/bash

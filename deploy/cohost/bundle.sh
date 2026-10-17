@@ -14,3 +14,4 @@ printf 'RPC_URL=%s\nPOOL=%s\nMARKET_HOURS=nyse\nTICK_MS=2000\n' https://rpc.hype
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf dist/dayone-keeper.tgz -C $B .
 rm -rf $B
 echo "dist/dayone-keeper.tgz $(wc -c < dist/dayone-keeper.tgz) bytes"
+echo "sha256 $(shasum -a 256 dist/dayone-keeper.tgz | cut -d' ' -f1)  (pass to install.sh)"
