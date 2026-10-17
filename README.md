@@ -1,7 +1,8 @@
-# Primer (working name)
+# Day One
 
-Private. A loss-funded counterparty pool for a newly listed HIP-3 perp, run by the market's
-deployer while the book is thin, and retired once it is deep enough.
+Private. Trade every HIP-3 listing from day one: a loss-funded counterparty pool for a newly
+listed HIP-3 perp, run by the market's deployer while the book is thin, and retired once it is
+deep enough.
 
 - Starts empty. Traders' losses and fees fill it; each $ lost mints pool shares to the loser.
   Profits the pool cannot pay yet wait in a FIFO queue (the Papertrade model).

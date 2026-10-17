@@ -1,4 +1,4 @@
-// Primer keeper: keeps the jump latch's anchor current, settles due requests, liquidates.
+// Day One keeper: keeps the jump latch's anchor current, settles due requests, liquidates.
 //
 //   RPC_URL=... POOL=0x... PRIVATE_KEY=0x... node keeper/keeper.ts [--once]
 //
