@@ -22,9 +22,11 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
 - `src/LaunchPool.sol`, `test/LaunchPool.t.sol`
-- `lib/hl-price-guard`: price reading and caps, pinned to a tagged version of HL Price Guard
-  (`fabrknt/hl-price-guard`). Move the submodule to a newer tag on purpose (`git -C lib/hl-price-guard
-  checkout vX.Y.Z`, then run the tests), never to its latest commit. Changes to the library are made
+- `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
+  submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
+  (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
+  Today the pin is `5d78517`, which is untagged; moving it to `v0.2.1` is pending (`v0.2.0` has a
+  `Rolling.reconfigure` bug). Changes to the library are made
   in that repo; it does not depend on Day One.
 
 - `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
