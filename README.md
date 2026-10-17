@@ -1,8 +1,13 @@
-# Day One
+# Day One — Fabrknt Labs
 
-Private. Trade every HIP-3 listing from day one: a loss-funded counterparty pool for a newly
-listed HIP-3 perp, run by the market's deployer while the book is thin, and retired once it is
-deep enough.
+Private. Research and a reference implementation, not a product. Not offered to traders.
+It studies how to make a newly listed HIP-3 perp tradable from day one without inviting the attacks
+a thin book invites: initial liquidity, price anomalies, exposure caps and stop conditions.
+Part of Fabrknt for HIP-3 (fabrknt.com/hip3/labs/day-one); it moves forward only when an operator
+(design partner) has a concrete need for it.
+
+The mechanism studied: a loss-funded counterparty pool for a newly listed HIP-3 perp, run by the
+market's deployer while the book is thin, and retired once it is deep enough.
 
 - Starts empty. Traders' losses and fees fill it; each $ lost mints pool shares to the loser.
   Profits the pool cannot pay yet wait in a FIFO queue (the Papertrade model).
@@ -17,7 +22,10 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
 - `src/LaunchPool.sol`, `test/LaunchPool.t.sol`
-- `lib/hl-price-guard`: price reading and caps. Changes to it are made in that repo.
+- `lib/hl-price-guard`: price reading and caps, pinned to a tagged version of HL Price Guard
+  (`fabrknt/hl-price-guard`). Move the submodule to a newer tag on purpose (`git -C lib/hl-price-guard
+  checkout vX.Y.Z`, then run the tests), never to its latest commit. Changes to the library are made
+  in that repo; it does not depend on Day One.
 
 - `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
   `MARKET_HOURS=nyse` it pauses new positions while NYSE is closed (`keeper/campana.mjs`).
