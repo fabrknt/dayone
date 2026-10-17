@@ -15,8 +15,8 @@ market's deployer while the book is thin, and retired once it is deep enough.
   winners give `winHaircutBps` of their profit to the pool (default 30%). rebate < haircut is
   enforced, which is what makes washing between two own accounts lose money.
 - **Shares priced high, redeemed low.** New shares are priced at `shareValuation()` = balance +
-  open positions' margin − queued debt, the most today's positions can bring in (each loses at
-  most its margin). Redemption pays out of `equity()`, which reserves, per side, that side's PnL
+  open positions' margin + pending opens' margin and fee − queued debt, the most today's
+  positions and requests can bring in (each loses at most its margin). Redemption pays out of `equity()`, which reserves, per side, that side's PnL
   plus its margin, so open losses never offset open winners. The first mint locks the rest of the
   valuation in shares the contract holds, so no early holder owns the pool.
 - **Settlement.** Two-step: request, then anyone settles after `settleDelay` at HL's oracle read
@@ -36,7 +36,7 @@ market's deployer while the book is thin, and retired once it is deep enough.
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (25 tests, including one regression per review
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (27 tests, including one regression per review
   finding: `test_r1_*`, `test_r2_*`)
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
@@ -63,10 +63,11 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 1 (e362390) | CHANGES | 6, all fixed in f93543b: cross-side netting in equity, first loser owning the pool, fees repriced under pending requests, opens blocking closes, rounding, unbounded keeper scan |
 | 2 (f93543b) | CHANGES | share pricing reopened (first mint could skip the lock), cap raises blockable forever; fixed in 2558cd0, plus a reentrancy guard |
 | 3 (2558cd0) | CHANGES | share pricing reopened again (repeated wash pairs diluted the lock); redesigned in b92ae5a: shares priced at `shareValuation()`; maintenance stored per position |
-| 4 (b92ae5a) | interrupted | Codex usage limit. The three round 3 attacks were rerun and are closed (a five-pair wash nets −$18,644 after redeeming); the independent check of the upper-bound claim is still to do |
+| 4 (b92ae5a) | CHANGES | round 3's three attacks closed (a five-pair wash nets −$18,644 after redeeming). New: a pending open's fee was outside the valuation, so a rebate minted before two high-fee requests settled redeemed $9,836 for a $3 loss; fixed in 58972d4 (`pendingOpens` in the valuation). Rebate starvation judged a fairness issue, not extraction |
+| 5 (58972d4) | in progress | check of the round 4 fix |
 
 ## Not done
-Review round 4 to completion; testnet deployment (prepared: `docs/testnet.md`, needs a funded key
+Review round 5 to completion; testnet deployment (prepared: `docs/testnet.md`, needs a funded key
 with big blocks on); market-hours calendars other than NYSE (KRX for xyz:SKHX and xyz:SMSN); audit.
 
-`forge test` (25 tests); `npm install && ./keeper/e2e.sh` (8 checks).
+`forge test` (27 tests); `npm install && ./keeper/e2e.sh` (8 checks).
