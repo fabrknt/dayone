@@ -14,9 +14,10 @@
 # - An upgrade stages a new release, then switches key, release link and unit. If anything fails
 #   from the switch on, or the service does not stay up, all three are put back and the previous
 #   service restarted.
-# - Installs are serialised with a lock. Once a run holds it, the uploaded key file is moved to
-#   a private copy in /run and the upload unlinked; the copy is removed on every exit.
-# - The bundle must match the SHA-256 given; npm runs with --ignore-scripts.
+# - Installs are serialised with a lock. Holding it, the key is read into a private copy in /run
+#   (removed on every exit); the upload is never deleted by this script, so remove it yourself.
+# - The bundle is read once into a private copy, which must match the SHA-256 given and is the
+#   copy extracted; npm runs with --ignore-scripts.
 set -euo pipefail
 umask 022
 BUNDLE=${1:?bundle}
@@ -37,7 +38,7 @@ exists() { [ -e "$1" ] || [ -L "$1" ]; } # a dangling symlink counts
 
 # State for cleanup: what this run created (first install) or switched (upgrade).
 FIRST=0 CREATED_USER=0 CREATED_BASE=0 CREATED_ETC=0 CREATED_UNIT=0
-SWITCHING=0 PREV= REL= STAGE= KEY_REPLACED=0 UNIT_SAVED=0 KEYTMP=
+SWITCHING=0 PREV= REL= STAGE= KEY_REPLACED=0 UNIT_SAVED=0 KEYTMP= BTMP=
 rollback() {
   [ -n "$PREV" ] && { ln -sfn "$PREV" "$BASE/current.new"; mv -T "$BASE/current.new" "$BASE/current"; }
   [ $KEY_REPLACED = 1 ] && [ -e "$ETC/key.prev" ] && mv -f "$ETC/key.prev" "$ETC/key"
@@ -63,15 +64,14 @@ cleanup() {
   [ $rc -eq 0 ] && rm -f "$UNIT.prev" "$ETC/key.prev"
   # the private copy of the uploaded key never outlives the run
   [ -n "$KEYTMP" ] && { shred -u "$KEYTMP" 2>/dev/null || rm -f "$KEYTMP"; }
+  [ -n "$BTMP" ] && rm -f "$BTMP"
 }
 trap cleanup EXIT
 
 [ "$(id -u)" = 0 ] || die "run as root"
 if [ -n "$KEYFILE" ]; then
   [ -f "$KEYFILE" ] && [ -s "$KEYFILE" ] || die "key file $KEYFILE is empty or missing"
-  # a plain file with one name, so removing the upload can never touch another file
-  [ ! -L "$KEYFILE" ] && [ "$(stat -c %h "$KEYFILE")" = 1 ] || { KEYFILE=; die "the key file must be a plain file, not a link"; }
-  # never accept the live key (or an alias of it): it would be replaced by itself, then shredded
+  # never accept the installed key (or an alias of it) as the new one: pass the uploaded copy
   case "$(readlink -f "$KEYFILE")" in "$ETC"/*) KEYFILE=; die "pass an uploaded copy, not the installed key" ;; esac
   if [ -e "$ETC/key" ] && [ "$(stat -c %d:%i "$KEYFILE")" = "$(stat -c %d:%i "$ETC/key")" ]; then
     KEYFILE=; die "pass an uploaded copy, not the installed key"
@@ -97,13 +97,18 @@ else
   FIRST=1
 fi
 ARCH=$(uname -m); case $ARCH in aarch64) ARCH=arm64 ;; x86_64) ARCH=x64 ;; *) die "unsupported arch $ARCH" ;; esac
-echo "$BUNDLE_SHA256  $BUNDLE" | sha256sum -c --quiet - || die "bundle does not match the SHA-256 given"
-# Only now, holding the lock and past every refusal, take the upload: copy it to a 0600 file in /run that this run
-# tracks, then remove the upload. A run refused before this point leaves the upload untouched.
+# The bundle is read once into a private copy, which is what gets hashed and extracted.
+[[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "the SHA-256 must be 64 lowercase hex characters"
+BTMP=$(umask 077; mktemp /run/$NAME.bundle.XXXXXX)
+cat -- "$BUNDLE" > "$BTMP"
+[ "$(sha256sum < "$BTMP" | cut -d' ' -f1)" = "$BUNDLE_SHA256" ] || die "bundle does not match the SHA-256 given"
+# Only now, holding the lock and past every refusal, read the key into a 0600 copy in /run. It must
+# look like a key, so a path pointing at some other file installs nothing. The upload itself is
+# left for the person who uploaded it to remove: a root script never deletes a path it was handed.
 if [ -n "$KEYFILE" ]; then
   KEYTMP=$(umask 077; mktemp /run/$NAME.key.XXXXXX)
-  cat "$KEYFILE" > "$KEYTMP"
-  rm -f -- "$KEYFILE" # unlink the upload; the private copy is the one shredded
+  head -c 200 -- "$KEYFILE" | tr -d '[:space:]' > "$KEYTMP"
+  grep -qxE '(0x)?[0-9a-fA-F]{64}' "$KEYTMP" || die "the key file does not hold a private key (64 hex characters)"
   KEYFILE=$KEYTMP
 fi
 
@@ -127,7 +132,7 @@ fi
 
 # 3. Stage the new release under a unique name; nothing live changes until it is complete.
 STAGE=$(mktemp -d "$BASE/releases/.stage.XXXXXX")
-tar -xzf "$BUNDLE" -C "$STAGE" --no-same-owner
+tar -xzf "$BTMP" -C "$STAGE" --no-same-owner
 [ -f "$STAGE/keeper/keeper.ts" ] && [ -f "$STAGE/keeper.env" ] && [ -f "$STAGE/out/LaunchPool.sol/LaunchPool.json" ] || die "bundle is incomplete"
 # --ignore-scripts: no package code runs as root at install; package-lock pins every tarball's hash
 (cd "$STAGE" && HOME=/nonexistent npm_config_cache="$STAGE/.npm" PATH="$NODEDIR/bin:$PATH" npm ci --omit=dev --ignore-scripts --no-audit --no-fund --silent)

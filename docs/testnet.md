@@ -20,16 +20,17 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
     install removes exactly what it created.
   - An upgrade stages a release, then switches key, release link and unit; any failure from there,
     or a service that does not stay up, restores all three and restarts the previous one.
-  - Runs are serialised with a lock. Holding it, the uploaded key is moved to a 0600 copy in
-    `/run` and removed; the copy goes on every exit. The installed key itself is refused as input.
-  - Checked in an Amazon Linux 2023 arm64 container with systemd: 15 scenarios in
+  - Runs are serialised with a lock. Holding it, the key is read into a 0600 copy in `/run`
+    (removed on every exit) and must be 64 hex characters. The script never deletes the upload:
+    remove it yourself, as the user who uploaded it. The installed key itself is refused as input.
+  - Checked in an Amazon Linux 2023 arm64 container with systemd: 16 scenarios in
     `deploy/cohost/scenarios.sh` (container only; it fakes failures).
-  - The bundle must match the SHA-256 bundle.sh printed; npm runs with `--ignore-scripts`. The key
-    file must be a plain file with one name; after the checks the upload is unlinked, never shredded
-    in place.
+  - The bundle is read once into a private copy, which must match the SHA-256 bundle.sh printed
+    and is the copy extracted; npm runs with `--ignore-scripts`.
   Run, from a machine with SSH to the host: `./deploy/cohost/bundle.sh` (prints the SHA-256), copy
   `dist/dayone-keeper.tgz`, `deploy/cohost/install.sh` and the key file over, then
-  `sudo bash install.sh dayone-keeper.tgz SHA256 KEYFILE` (upgrades: omit KEYFILE).
+  `sudo bash install.sh dayone-keeper.tgz SHA256 KEYFILE; shred -u KEYFILE` (upgrades: omit
+  KEYFILE).
 - Rate limit: the public testnet RPC rejected about one tick in six ("Request exceeds defined
   limit") when the keeper made 7 reads a tick. It now reads through Multicall3 (1 call a tick, 2
   with positions) and the hosted keeper ticks every 2 s (`TICK_MS`): no failures in 90 s.

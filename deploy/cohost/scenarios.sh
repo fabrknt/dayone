@@ -11,8 +11,8 @@ ln -s /nonexistent /etc/systemd/system/dayone-keeper.service
 echo x > /root/k; bash $I $G $GS /root/k 2>&1 | tail -1
 unlink /etc/systemd/system/dayone-keeper.service; state
 
-echo "== bad key, first install"
-echo nothex > /root/k; bash $I $G $GS /root/k 2>&1 | tail -1; state
+echo "== a first install whose release fails at start leaves the host clean"
+cp /root/good.key /root/k; bash $I $B $BS /root/k 2>&1 | tail -1; state
 
 echo "== good first install"
 cp /root/good.key /root/k; bash $I $G $GS /root/k 2>&1 | grep -E '^active|install.sh'; state
@@ -61,17 +61,19 @@ mv /etc/systemd/system/dayone-keeper.service /root/unit.real; ln -s /root/unit.r
 bash $I $G $GS 2>&1 | tail -1
 unlink /etc/systemd/system/dayone-keeper.service; mv /root/unit.real /etc/systemd/system/dayone-keeper.service
 
-echo "== key upgrade succeeds, upload and private copy gone"
+echo "== key upgrade succeeds, private copy gone, upload left for the uploader"
 cp /root/good.key /root/k4; bash $I $G $GS /root/k4 2>&1 | grep -E '^active|install.sh'
-ls /root/k4 >/dev/null 2>&1 || echo "  upload removed"; echo "  run files: $(ls /run | grep dayone | tr '\n' ' ')"
+ls /root/k4 >/dev/null 2>&1 && echo "  upload left for the uploader"; echo "  run files: $(ls /run | grep dayone | tr '\n' ' ')"; unlink /root/k4
 
-echo "== a wrong bundle hash is refused"
+echo "== a wrong bundle hash, a malformed hash and a newline filename are refused"
 bash $I $G 0000000000000000000000000000000000000000000000000000000000000000 2>&1 | tail -1
+bash $I $G "$GS  x" 2>&1 | tail -1
+cd /root; NL=$'good\n'"$GS"'  dayone-keeper.tgz'; cp $B "$NL"; bash $I "$NL" $GS 2>&1 | tail -1; rm -f -- "$NL"; cd /
 
-echo "== a key file that is a link is refused and its target untouched"
-echo victim > /root/victim; ln /root/victim /root/hard; ln -s /root/victim /root/soft
-bash $I $G $GS /root/hard 2>&1 | tail -1; bash $I $G $GS /root/soft 2>&1 | tail -1
-echo "  victim: $(cat /root/victim)"; unlink /root/hard; unlink /root/soft; unlink /root/victim
+echo "== a key path pointing at another file (via a symlinked parent) installs nothing, deletes nothing"
+mkdir -p /root/up; ln -s /etc /root/up/d
+bash $I $G $GS /root/up/d/hostname 2>&1 | tail -1
+echo "  /etc/hostname still there: $(test -f /etc/hostname && echo yes)"; unlink /root/up/d; rmdir /root/up
 
 echo "== a refused incomplete install keeps the upload"
 cp /root/good.key /root/k5; mv /opt/dayone-keeper/current /opt/dayone-keeper/current.hidden
