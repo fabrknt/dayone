@@ -9,11 +9,13 @@
 #
 # - It refuses to run if any of those exist without its marker, so it never takes over
 #   something another project made. The marker is written only after the first install has
-#   started a healthy service; a first install that fails removes everything it created.
-# - An upgrade stages a new release, switches to it, and checks the service stays up. If it
-#   does not, the previous release and key are put back and the old service restarted.
-# - Installs are serialised with a lock.
+#   started a healthy service; a first install that fails removes exactly what it created.
+# - An upgrade stages a new release, then switches key, release link and unit. If anything fails
+#   from the switch on, or the service does not stay up, all three are put back and the previous
+#   service restarted.
+# - Installs are serialised with a lock. The uploaded key file is removed on every exit.
 set -euo pipefail
+umask 022
 BUNDLE=${1:?bundle}
 KEYFILE=${2:-}
 NAME=dayone-keeper
@@ -27,45 +29,69 @@ declare -A NODE_SHA256=( # from https://nodejs.org/dist/v24.11.1/SHASUMS256.txt
   [x64]=58a5ff5cc8f2200e458bea22e329d5c1994aa1b111d499ca46ec2411d58239ca
 )
 die() { echo "install.sh: $*" >&2; exit 1; }
+exists() { [ -e "$1" ] || [ -L "$1" ]; } # a dangling symlink counts
+
+# State for cleanup: what this run created (first install) or switched (upgrade).
+FIRST=0 CREATED_USER=0 CREATED_BASE=0 CREATED_ETC=0 CREATED_UNIT=0
+SWITCHING=0 PREV= REL= STAGE= KEY_REPLACED=0 UNIT_SAVED=0
+rollback() {
+  [ -n "$PREV" ] && { ln -sfn "$PREV" "$BASE/current.new"; mv -T "$BASE/current.new" "$BASE/current"; }
+  [ $KEY_REPLACED = 1 ] && [ -e "$ETC/key.prev" ] && mv -f "$ETC/key.prev" "$ETC/key"
+  [ $UNIT_SAVED = 1 ] && mv -f "$UNIT.prev" "$UNIT"
+  [ -n "$REL" ] && [ "$(readlink -f "$BASE/current")" != "$REL" ] && rm -rf "$REL"
+  systemctl daemon-reload || true
+  systemctl restart $NAME || true
+}
+cleanup() {
+  local rc=$?
+  set +e
+  [ -n "$STAGE" ] && rm -rf "$STAGE"
+  if [ $rc -ne 0 ] && [ $FIRST = 1 ]; then
+    if [ $CREATED_UNIT = 1 ]; then systemctl disable --now $NAME >/dev/null 2>&1; rm -f "$UNIT"; systemctl daemon-reload; fi
+    [ $CREATED_ETC = 1 ] && rm -rf "$ETC"
+    [ $CREATED_BASE = 1 ] && rm -rf "$BASE"
+    [ $CREATED_USER = 1 ] && userdel $NAME
+    echo "install.sh: first install failed; removed what it created" >&2
+  elif [ $rc -ne 0 ] && [ $SWITCHING = 1 ]; then
+    rollback
+    echo "install.sh: upgrade failed; restored ${PREV:-the previous state}" >&2
+  fi
+  [ $rc -eq 0 ] && rm -f "$UNIT.prev" "$ETC/key.prev"
+  # the uploaded key never stays where it was uploaded, whatever happened
+  [ -n "$KEYFILE" ] && [ -e "$KEYFILE" ] && { shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"; }
+}
+trap cleanup EXIT
+
 [ "$(id -u)" = 0 ] || die "run as root"
+if [ -n "$KEYFILE" ]; then
+  [ -f "$KEYFILE" ] && [ -s "$KEYFILE" ] || die "key file $KEYFILE is empty or missing"
+  # never accept the live key (or an alias of it): it would be replaced by itself, then shredded
+  case "$(readlink -f "$KEYFILE")" in "$ETC"/*) KEYFILE=; die "pass an uploaded copy, not the installed key" ;; esac
+  if [ -e "$ETC/key" ] && [ "$(stat -c %d:%i "$KEYFILE")" = "$(stat -c %d:%i "$ETC/key")" ]; then
+    KEYFILE=; die "pass an uploaded copy, not the installed key"
+  fi
+fi
 
 exec 9>/run/$NAME.install.lock
 flock -n 9 || die "another install is running"
 
 # 1. Only proceed on a clean host or on our own committed install.
-FIRST=0
 if [ -e "$MARKER" ]; then
   [ "$(stat -c %u "$MARKER")" = 0 ] || die "$MARKER is not root-owned"
   [ -e "$ETC/key" ] || [ -n "$KEYFILE" ] || die "no key installed; pass the key file"
 else
-  for p in "$BASE" "$ETC" "$UNIT"; do [ -e "$p" ] && die "$p exists but was not made by this script"; done
+  for p in "$BASE" "$ETC" "$UNIT"; do exists "$p" && die "$p exists but was not made by this script"; done
   id "$NAME" >/dev/null 2>&1 && die "user $NAME exists but was not made by this script"
   [ -n "$KEYFILE" ] || die "first install needs the key file"
   FIRST=1
 fi
-[ -z "$KEYFILE" ] || [ -s "$KEYFILE" ] || die "key file $KEYFILE is empty or missing"
 ARCH=$(uname -m); case $ARCH in aarch64) ARCH=arm64 ;; x86_64) ARCH=x64 ;; *) die "unsupported arch $ARCH" ;; esac
 
-# On any failure of a first install, remove everything it created; the host is as before.
-STAGE=
-cleanup() {
-  local rc=$?
-  [ -n "$STAGE" ] && rm -rf "$STAGE"
-  # the uploaded key never stays where it was uploaded, whatever happened (rerun with a new copy)
-  [ -n "$KEYFILE" ] && { shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"; }
-  if [ $rc -ne 0 ] && [ $FIRST = 1 ]; then
-    systemctl disable --now $NAME >/dev/null 2>&1 || true
-    rm -f "$UNIT"; systemctl daemon-reload || true
-    rm -rf "$BASE" "$ETC"
-    id $NAME >/dev/null 2>&1 && userdel $NAME || true
-    echo "install.sh: first install failed; removed what it created" >&2
-  fi
-}
-trap cleanup EXIT
-
-umask 022
-install -d -m 755 -o root -g root "$BASE" "$BASE/releases"
-[ $FIRST = 0 ] || useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin $NAME
+if [ $FIRST = 1 ]; then
+  useradd --system --no-create-home --home-dir /nonexistent --shell /sbin/nologin $NAME; CREATED_USER=1
+  install -d -m 755 -o root -g root "$BASE"; CREATED_BASE=1
+fi
+install -d -m 755 -o root -g root "$BASE/releases"
 
 # 2. Our own Node, root-owned, checksum verified.
 NODEDIR=$BASE/node-$NODE-linux-$ARCH
@@ -101,16 +127,19 @@ REL=$BASE/releases/$(date -u +%Y%m%dT%H%M%SZ)-${STAGE##*.stage.}
 mv -T "$STAGE" "$REL"
 STAGE=
 
-# 4. Switch: key (keeping the old one), release link, unit. Remember what to restore.
+# 4. Switch key, release link and unit, keeping what was there; any failure from here rolls back.
 PREV=$(readlink "$BASE/current" 2>/dev/null || true)
-install -d -m 500 -o $NAME -g $NAME "$ETC"
+[ $FIRST = 1 ] || SWITCHING=1
+if [ ! -d "$ETC" ]; then install -d -m 500 -o $NAME -g $NAME "$ETC"; [ $FIRST = 1 ] && CREATED_ETC=1; fi
 if [ -n "$KEYFILE" ]; then
   [ -e "$ETC/key" ] && cp -p "$ETC/key" "$ETC/key.prev"
   install -m 400 -o $NAME -g $NAME "$KEYFILE" "$ETC/key.new"
   mv -f "$ETC/key.new" "$ETC/key"
+  KEY_REPLACED=1
 fi
 ln -sfn "$REL" "$BASE/current.new"
 mv -T "$BASE/current.new" "$BASE/current"
+[ -e "$UNIT" ] && cp -p "$UNIT" "$UNIT.prev" && UNIT_SAVED=1
 cat > "$UNIT.new" <<UNIT
 [Unit]
 Description=Day One keeper (HyperEVM testnet)
@@ -142,30 +171,22 @@ UMask=077
 WantedBy=multi-user.target
 UNIT
 mv -f "$UNIT.new" "$UNIT"
+[ $FIRST = 1 ] && CREATED_UNIT=1
 systemctl daemon-reload
 systemctl enable $NAME >/dev/null
 
-# 5. Healthy = active and not restarted for 15 s after the restart.
-healthy() {
-  systemctl restart $NAME || return 1
-  sleep 15
-  [ "$(systemctl is-active $NAME)" = active ] && [ "$(systemctl show $NAME -p NRestarts --value)" = 0 ]
-}
-if ! healthy; then
+# 5. Healthy = active and not restarted for 15 s after the restart. Not healthy -> exit non-zero,
+# and cleanup() rolls back (upgrade) or removes everything (first install).
+systemctl restart $NAME
+sleep 15
+if [ "$(systemctl is-active $NAME)" != active ] || [ "$(systemctl show $NAME -p NRestarts --value)" != 0 ]; then
   journalctl -u $NAME -n 10 --no-pager -o cat >&2 || true
-  if [ $FIRST = 1 ]; then die "the new keeper did not stay up"; fi
-  if [ -n "$PREV" ]; then
-    ln -sfn "$PREV" "$BASE/current.new"; mv -T "$BASE/current.new" "$BASE/current"
-  fi
-  [ -n "$KEYFILE" ] && [ -e "$ETC/key.prev" ] && mv -f "$ETC/key.prev" "$ETC/key"
-  rm -rf "$REL"
-  systemctl restart $NAME || true
-  die "the new keeper did not stay up; rolled back to ${PREV:-nothing}"
+  die "the new keeper did not stay up"
 fi
 
-# 6. Committed: mark the install ours, drop the uploaded and previous keys, prune old releases.
+# 6. Committed: mark the install ours and prune old releases (the running one is never removed).
 touch "$MARKER"
-rm -f "$ETC/key.prev"
+SWITCHING=0
 CUR=$(readlink -f "$BASE/current")
 ls -1d "$BASE"/releases/2*/ 2>/dev/null | sort | head -n -2 | while read -r old; do
   [ "${old%/}" = "$CUR" ] || rm -rf "$old"
