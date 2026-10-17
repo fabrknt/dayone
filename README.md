@@ -45,12 +45,14 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
-- `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates; with
+- `keeper/keeper.ts`: pokes on each oracle change, settles due requests, liquidates, reading
+  through Multicall3 so a public RPC's rate limit holds (`TICK_MS`, default 1 s); with
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
   (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
   outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
+  `deploy/cohost/` runs it as a systemd service on an existing Linux host.
 
 ## Web UI
 `web/`: trade, pool and positions in one page (Vite + React + viem).

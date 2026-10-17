@@ -16,6 +16,7 @@
 import { readFileSync } from "node:fs";
 import {
   createPublicClient, createWalletClient, http, decodeAbiParameters, encodeAbiParameters,
+  encodeFunctionData, decodeFunctionResult, parseAbi,
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -23,6 +24,17 @@ import { marketStatus as nyseStatus } from "./campana.mjs";
 import { marketStatus as krxStatus } from "./krx.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
+// Public RPCs rate-limit per request, so each tick reads everything through Multicall3 (deployed
+// at the usual address on HyperEVM mainnet and testnet): one call for the oracle, block time,
+// active ids and pause flag, and one more for the positions when there are any.
+const MULTICALL3: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
+const mcAbi = parseAbi([
+  "struct Call3 { address target; bool allowFailure; bytes callData; }",
+  "struct Result { bool success; bytes returnData; }",
+  "function aggregate3(Call3[] calls) view returns (Result[])",
+  "function getCurrentBlockTimestamp() view returns (uint256)",
+]);
+const TICK_MS = Number(process.env.TICK_MS ?? 1000);
 const abi = JSON.parse(readFileSync(new URL("../out/LaunchPool.sol/LaunchPool.json", import.meta.url), "utf8")).abi;
 
 const rpc = process.env.RPC_URL ?? "http://127.0.0.1:8545";
@@ -70,31 +82,57 @@ async function send(functionName: string, args: unknown[] = []): Promise<boolean
   }
 }
 
+/// One eth_call for several reads; a failed sub-call throws, so the tick retries as a whole.
+async function batch(calls: { target: Address; data: Hex }[]): Promise<Hex[]> {
+  const results = await pub.readContract({
+    address: MULTICALL3, abi: mcAbi, functionName: "aggregate3",
+    args: [calls.map((c) => ({ target: c.target, allowFailure: false, callData: c.data }))],
+  });
+  return results.map((x) => x.returnData);
+}
+const poolCall = (functionName: string, args: unknown[] = []) =>
+  ({ target: pool, data: encodeFunctionData({ abi, functionName, args }) });
+const poolResult = (functionName: string, data: Hex) =>
+  decodeFunctionResult({ abi, functionName, data }) as any;
+
 let lastOracle = -1n;
+let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
+let params: { maintenanceBps: bigint; settleDelay: bigint; at: number } | undefined;
 
 async function tick() {
-  const [dex, index, szDecimals] = await read("asset");
-  const perp = dex * 10000 + index;
-  const raw = await pub.call({ to: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [perp]) });
-  const [px] = decodeAbiParameters([{ type: "uint64" }], raw.data as Hex);
-  const oracle = (px as bigint) * 10n ** (12n + BigInt(szDecimals));
+  if (!asset) {
+    const [dex, index, szDecimals] = await read("asset");
+    asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
+  }
+  if (!params || Date.now() - params.at > 60_000) { // params change only after paramsDelay
+    const p = await read("getParams");
+    params = { maintenanceBps: BigInt(p.maintenanceBps), settleDelay: BigInt(p.settleDelay), at: Date.now() };
+  }
+  const [rawPx, rawNow, rawIds, rawPaused] = await batch([
+    { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
+    { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
+    poolCall("activeIds"),
+    poolCall("opensPaused"),
+  ]);
+  const [px] = decodeAbiParameters([{ type: "uint64" }], rawPx);
+  const oracle = (px as bigint) * asset.scale;
+  const now = decodeFunctionResult({ abi: mcAbi, functionName: "getCurrentBlockTimestamp", data: rawNow });
+  // only pending and open positions: closed and cancelled ids leave this list on chain
+  const ids = poolResult("activeIds", rawIds) as bigint[];
+
   if (oracle !== lastOracle) {
     if (await send("poke")) lastOracle = oracle;
   }
 
   if (hoursFn) {
-    const now = Number((await pub.getBlock()).timestamp);
-    const shouldPause = hoursFn(now).status === "CLOSED";
-    if ((await read("opensPaused")) !== shouldPause) await send("setOpensPaused", [shouldPause]);
+    const shouldPause = hoursFn(Number(now)).status === "CLOSED";
+    if (poolResult("opensPaused", rawPaused) !== shouldPause) await send("setOpensPaused", [shouldPause]);
   }
 
-  const p = await read("getParams");
-  const [maintenanceBps, settleDelay] = [BigInt(p.maintenanceBps), BigInt(p.settleDelay)];
-  const now = (await pub.getBlock()).timestamp;
-  // only pending and open positions: closed and cancelled ids leave this list on chain
-  const ids: bigint[] = await read("activeIds");
-  for (const id of ids) {
-    const [owner, long, leverage, margin, entry, requestedAt, closing] = await read("positions", [id]);
+  const { maintenanceBps, settleDelay } = params;
+  const rows = ids.length ? await batch(ids.map((id) => poolCall("positions", [id]))) : [];
+  for (const [i, id] of ids.entries()) {
+    const [owner, long, leverage, margin, entry, requestedAt, closing] = poolResult("positions", rows[i]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {
       await send("settle", [id]);
@@ -115,5 +153,5 @@ do {
   } catch (e) {
     console.log(`${new Date().toISOString()} tick failed: ${why(e)}`);
   }
-  if (!once) await new Promise((r) => setTimeout(r, 1000));
+  if (!once) await new Promise((r) => setTimeout(r, TICK_MS));
 } while (!once);
