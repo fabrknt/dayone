@@ -9,7 +9,9 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   keeper at 373.42, the same oracle the HL API reported. The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
 - Page: `?net=testnet&pool=0x372Efd44DD50FBc0b070A0729756659f12539040&usdc=0xCC8F721D907Ef034ca8A239f1A942e4bC8c122b3`.
-- The keeper runs on a local machine for now, so it stops when that machine does.
+- Keeper host: moving from a local machine to an existing always-on host as its own systemd
+  service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
+  under its own user, capped at 200 MB and a quarter of a CPU, key root-only in `/etc/dayone`).
 
 ## Market
 Default: testnet xyz:TSLA. xyz is dex 65 on testnet (dex 1 on mainnet), so:

@@ -7,3 +7,4 @@ broadcast/
 web/node_modules/
 web/dist/
 web/public/local.json
+dist/
