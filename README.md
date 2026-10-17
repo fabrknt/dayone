@@ -84,10 +84,11 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 6 (adbeca4) | CHANGES | keeper and host scripts, no contract change. An expired market-hours calendar aborted the whole tick (settle and liquidate too); a 60 s params cache delayed settlements; install.sh could take over another project's paths, had no rollback and trusted a shared Node. Fixed in 2dbae7c |
 | 6b–6e | CHANGES | install.sh only, narrowing each round: marker written before a healthy start, no rollback on failures after the switch, the live key accepted as input, an incomplete install accepted. 6d also caught that 24269ec's message described a key handoff that was not in the code (corrected in ad079cf). Fixed in 56a22df, 24269ec, ad079cf, 6ef0210 |
 | 6f–6h | CHANGES, CHANGES, APPROVE | install.sh: a linked key file could overwrite another file, an unauthenticated bundle with npm scripts as root, then a newline filename beating the checksum and a hash-then-extract race. Fixed in 7171c44 and e2ee339 (one private bundle copy, hashed and extracted; the script never deletes the upload). 6h: no HIGH left; three medium/low items recorded in docs/testnet.md |
+| 7 (26e8c21) | CHANGES | the falling win haircut. The curve was stored per position but the rebate was read live, so opening both sides while a valid change (flat 30%, rebate 29.99%) waited out paramsDelay paired the old 15% floor with the new rebate (+$48.90 for the pair; the flat haircut had the same hole). Fixed in e9c7a66: the rebate is stored per position too |
+| 7b (e9c7a66) | APPROVE | round 7 PoC closed (pair −$75.51); fee, maintenance, curve and rebate all used as stored on close and liquidation; the redeem buffer stays live by design |
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); the win-haircut curve (branch `feat/haircut-curve`, to review
-as round 7); calendars beyond 2026 and other exchanges; audit; mainnet.
+on a local machine until then); calendars beyond 2026 and other exchanges; audit; mainnet.
 
 `forge test` (36 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.
