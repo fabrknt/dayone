@@ -194,7 +194,7 @@ export default function App() {
               </button>
               <p className="fine">
                 Two steps: you request now, and it settles at the oracle once {String(pool?.settleDelay ?? 3n)} s have passed.
-                Winners keep {pool ? 100 - pool.winHaircutBps / 100 : 70}% of profit on small moves, rising to {pool ? 100 - pool.winHaircutMinBps / 100 : 85}% once the price has moved {pool ? pool.haircutToMoveBps / 100 : 1}%; losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of their loss.
+                Winners keep {pool ? 100 - pool.winHaircutBps / 100 : 70}% of profit on small moves, rising to {pool ? 100 - pool.winHaircutMinBps / 100 : 85}% once the price has moved {pool ? pool.haircutToMoveBps / 100 : 1}%; losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of their loss. These are the terms for new positions; each position keeps the terms it was opened with.
               </p>
             </>
           )}

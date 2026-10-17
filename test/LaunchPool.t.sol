@@ -105,7 +105,7 @@ contract LaunchPoolTest is Test {
         pool.settle(id);
         vm.warp(block.timestamp + 3);
         pool.settle(id);
-        (,,,, uint256 entry,,,,,,) = pool.positions(id);
+        (,,,, uint256 entry,,,,,,,) = pool.positions(id);
         assertEq(entry, 350e18);
     }
 
@@ -526,7 +526,7 @@ contract LaunchPoolTest is Test {
         pool.applyParams();
         vm.expectRevert(LaunchPool.NotLiquidatable.selector);
         pool.liquidate(id);
-        (address owner,,,,,,,,,,) = pool.positions(id);
+        (address owner,,,,,,,,,,,) = pool.positions(id);
         assertEq(owner, alice);
         emit log_string("existing 10x position survives delayed maintenance raise");
     }
@@ -692,16 +692,59 @@ contract LaunchPoolTest is Test {
         uint256 low = pool.equity(price);
         uint256 high = pool.shareValuation();
         vm.warp(block.timestamp + 60);
-        (address ownerL,,,,,,,,,,) = pool.positions(l);
+        (address ownerL,,,,,,,,,,,) = pool.positions(l);
         if (ownerL != address(0)) {
             try pool.liquidate(l) {} catch { close(alice, l); }
         }
-        (address ownerS,,,,,,,,,,) = pool.positions(sh);
+        (address ownerS,,,,,,,,,,,) = pool.positions(sh);
         if (ownerS != address(0)) {
             try pool.liquidate(sh) {} catch { close(bob, sh); }
         }
         uint256 after_ = pool.poolBalance() > pool.totalDebt() ? pool.poolBalance() - pool.totalDebt() : 0;
         assertGe(after_ + 1, low); // rounding: at most one unit
         assertLe(after_, high);
+    }
+
+    // ---- regressions for Codex round 7 ----
+
+    /// R7-F1: open both sides under the 30% -> 15% curve, then a valid change to a flat 30% curve
+    /// with a 29.99% rebate is applied. The old winner still pays the old floor (15%); the old
+    /// loser must get the old rebate (12%), not the new one, or the pair profits.
+    function test_r7_rebateFixedAtRequest() public {
+        address carol = address(0xCA201);
+        usdc.mint(carol, 100_000 * USDC);
+        vm.prank(carol);
+        usdc.approve(address(pool), type(uint256).max);
+        uint256 c = open(carol, true, 25_000 * USDC, 20); // unrelated holders own most of the pool
+        setPx(343_000);
+        vm.warp(block.timestamp + 60);
+        close(carol, c);
+        pool.poke();
+
+        uint256 before = usdc.balanceOf(alice) + usdc.balanceOf(bob);
+        vm.warp(block.timestamp + 60);
+        uint256 l = open(alice, true, 1_000 * USDC, 20);
+        uint256 sh = open(bob, false, 1_000 * USDC, 20);
+        LaunchPool.Params memory p = defaultParams();
+        (p.winHaircutBps, p.winHaircutMinBps, p.rebateBps) = (3000, 3000, 2999);
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.applyParams();
+
+        setPx(349_860);
+        pool.poke();
+        setPx(356_720); // +4%: the old winner pays its own floor, 15%
+        assertEq(pool.haircutAt(l, 356.72e18), 1500);
+        vm.warp(block.timestamp + 60);
+        uint256 sharesBefore = pool.shares(bob);
+        close(bob, sh); // loses $800 + $1.60 fee
+        uint256 minted = pool.shares(bob) - sharesBefore;
+        close(alice, l);
+        uint256 eq = pool.equity(356.72e18);
+        uint256 pairShareValue = (pool.shares(alice) + pool.shares(bob)) * eq / pool.totalShares();
+        int256 pair = int256(usdc.balanceOf(alice) + usdc.balanceOf(bob) + pairShareValue) - int256(before);
+        emit log_named_uint("shares minted to the old loser", minted);
+        emit log_named_int("pair net (USDC units)", pair);
+        assertLt(pair, 0);
     }
 }

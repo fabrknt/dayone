@@ -70,6 +70,7 @@ contract LaunchPool {
         uint64 haircut; // the curve fixed at request: max, min, from, to (16 bits each)
         uint16 maintenanceBps; // fixed at request: a later raise cannot liquidate this position
         uint256 openFee; // paid at request; refunded on cancel, pool income on settle
+        uint16 rebateBps; // fixed at request, with the haircut curve, so rebate < floor holds per position
     }
 
     struct Debt {
@@ -270,7 +271,8 @@ contract LaunchPool {
             P.feeBps,
             _packHaircut(P),
             P.maintenanceBps,
-            openFee
+            openFee,
+            P.rebateBps
         );
         _active.push(id);
         _activeIndex[id] = _active.length;
@@ -332,7 +334,7 @@ contract LaunchPool {
         if (left != 0) collateral.transfer(p.owner, left);
         uint256 lost = p.margin - left;
         _income(lost);
-        _mintShares(p.owner, lost);
+        _mintShares(p.owner, lost, p.rebateBps);
         emit Liquidated(id, price, lost);
     }
 
@@ -515,7 +517,7 @@ contract LaunchPool {
             if (loss > p.margin) loss = p.margin; // liquidation should have come first
             collateral.transfer(p.owner, p.margin - loss);
             _income(loss);
-            _mintShares(p.owner, loss > fee ? loss - fee : 0);
+            _mintShares(p.owner, loss > fee ? loss - fee : 0, p.rebateBps);
         }
         emit Closed(id, price, pnl, paid, queued);
     }
@@ -534,12 +536,13 @@ contract LaunchPool {
         poolBalance += amount;
     }
 
-    /// Shares worth `rebateBps` of the loss, priced at shareValuation().
+    /// Shares worth `rebateBps` (the position's own, fixed at request) of the loss, priced at
+    /// shareValuation().
     ///
     /// The first mint also creates locked shares (held by this contract, never redeemable) for
     /// the rest of the valuation, so the first loser's shares are worth the rebate and no more.
-    function _mintShares(address to, uint256 loss) internal {
-        uint256 value = loss * _params.rebateBps / 10_000;
+    function _mintShares(address to, uint256 loss, uint256 rebateBps) internal {
+        uint256 value = loss * rebateBps / 10_000;
         if (value == 0) return;
         // the loss is already in poolBalance, so v >= loss > value unless winners are queued
         uint256 v = shareValuation();
