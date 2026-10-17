@@ -10,7 +10,9 @@ K0=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 K1=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 T1=$(cast wallet address $K1)
 
-anvil --port $PORT --silent &
+# chain time starts on Fri 2026-10-16 00:00 UTC, so the dated steps below (Sat 10-17, Mon 10-19, ...)
+# are always in the future, whatever day this runs
+anvil --port $PORT --timestamp 1792108800 --silent &
 ANVIL=$!
 trap "kill $ANVIL" EXIT
 until cast block-number --rpc-url $RPC >/dev/null 2>&1; do sleep 0.2; done
