@@ -20,7 +20,9 @@ interface IRefSource {
 /// - Starts empty. Traders' losses and fees fill it. Losers get pool shares worth `rebateBps` of
 ///   their loss; winners give up `winHaircutBps` of their profit. Keeping rebate < haircut is
 ///   what makes washing between two own accounts (one long, one short) lose money.
-/// - Profits the pool cannot pay yet wait in a FIFO queue, paid from later losses.
+/// - Profits the pool cannot pay yet wait in a FIFO queue, paid from later losses. Paying it
+///   is O(1) however long it is: income only moves a cumulative counter, and each winner's
+///   paid part is sent by claim(id) (anyone may call it; the keeper does).
 /// - Opens and closes are two-step: request now, settle at the guarded oracle at least
 ///   `settleDelay` seconds later.
 /// - Opens and closes each have a rolling notional cap (ExposureBudget.Rolling): on replay, the
@@ -73,9 +75,13 @@ contract LaunchPool {
         uint16 rebateBps; // fixed at request, with the haircut curve, so rebate < floor holds per position
     }
 
+    /// A queued winner. Paid in order: debt `id` is paid once debtPaid passes `start`, the
+    /// total queued before it.
     struct Debt {
         address to;
+        uint256 start;
         uint256 amount;
+        uint256 claimed;
     }
 
     IERC20 public immutable collateral;
@@ -102,8 +108,10 @@ contract LaunchPool {
     uint256 public minReserve; // never redeemable
 
     Debt[] public debts;
-    uint256 public debtHead;
-    uint256 public totalDebt;
+    uint256 public debtQueued; // all ever queued
+    uint256 public debtPaid; // all ever paid into the queue, in order
+    uint256 public totalDebt; // debtQueued - debtPaid: still owed to queued winners
+    uint256 public unclaimed; // paid into the queue, not yet sent by claim()
     uint256 public pendingOpens; // margin + open fee held for requested, unsettled opens
 
     mapping(uint256 => Position) public positions;
@@ -134,6 +142,7 @@ contract LaunchPool {
     event ParamsProposed(uint64 effectiveAt);
     event ParamsApplied();
     event PauserSet(address pauser);
+    event Claimed(uint256 indexed id, address indexed to, uint256 amount);
 
     error NotOperator();
     error NotPauser();
@@ -198,6 +207,17 @@ contract LaunchPool {
 
     function activeIds() external view returns (uint256[] memory) {
         return _active;
+    }
+
+    function debtCount() external view returns (uint256) {
+        return debts.length;
+    }
+
+    /// What claim(id) would send now.
+    function claimable(uint256 id) public view returns (uint256) {
+        Debt storage d = debts[id];
+        uint256 paid = debtPaid > d.start ? debtPaid - d.start : 0;
+        return (paid < d.amount ? paid : d.amount) - d.claimed;
     }
 
     function openLaneUsed() external view returns (uint256) {
@@ -367,6 +387,19 @@ contract LaunchPool {
         return _price();
     }
 
+    /// Send queued winner `id` what the queue has paid them so far. Anyone may call; the
+    /// money only goes to the winner.
+    function claim(uint256 id) external nonReentrant returns (uint256 amount) {
+        if (id >= debts.length) revert BadRequest();
+        amount = claimable(id);
+        if (amount == 0) revert BadRequest();
+        Debt storage d = debts[id];
+        d.claimed += amount;
+        unclaimed -= amount;
+        collateral.transfer(d.to, amount);
+        emit Claimed(id, d.to, amount);
+    }
+
     // ---- shares ----
 
     /// Burn shares for their part of the pool's equity, at the guarded oracle. Blocked while
@@ -531,7 +564,8 @@ contract LaunchPool {
             poolBalance -= paid;
             queued = profit - paid;
             if (queued != 0) {
-                debts.push(Debt(p.owner, queued));
+                debts.push(Debt(p.owner, debtQueued, queued, 0));
+                debtQueued += queued;
                 totalDebt += queued;
             }
             collateral.transfer(p.owner, p.margin + paid);
@@ -545,18 +579,16 @@ contract LaunchPool {
         emit Closed(id, price, pnl, paid, queued);
     }
 
-    /// New collateral for the pool: pay the debt queue first, keep the rest.
+    /// New collateral for the pool: pay the debt queue first, keep the rest. No loop: the
+    /// paid part waits in `unclaimed` until claim() sends it.
     function _income(uint256 amount) internal {
-        while (amount != 0 && debtHead < debts.length) {
-            Debt storage d = debts[debtHead];
-            uint256 pay = amount < d.amount ? amount : d.amount;
-            d.amount -= pay;
+        uint256 pay = amount < totalDebt ? amount : totalDebt;
+        if (pay != 0) {
+            debtPaid += pay;
             totalDebt -= pay;
-            amount -= pay;
-            collateral.transfer(d.to, pay);
-            if (d.amount == 0) debtHead++;
+            unclaimed += pay;
         }
-        poolBalance += amount;
+        poolBalance += amount - pay;
     }
 
     /// Shares worth `rebateBps` (the position's own, fixed at request) of the loss, priced at

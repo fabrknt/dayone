@@ -127,6 +127,18 @@ contract Handler is Test {
         if (_onSome(seed, _liquidate)) calls["liquidate"]++;
     }
 
+    function claim(uint256 seed) external {
+        uint256 n = pool.debtCount();
+        for (uint256 i; i < n; i++) {
+            uint256 id = (seed + i) % n;
+            if (pool.claimable(id) != 0) {
+                pool.claim(id);
+                calls["claim"]++;
+                return;
+            }
+        }
+    }
+
     /// Up to ±2.5%: within the latch's 2% sometimes, past it otherwise.
     function movePrice(int256 bps) external {
         bps = bound(bps, -250, 250);
@@ -212,26 +224,33 @@ contract LaunchPoolInvariantTest is Test {
         targetContract(address(h));
     }
 
-    /// Every token the pool holds is accounted for: the pool's own balance, open margin and
-    /// pending opens. Nothing leaks and nothing is promised twice.
+    /// Every token the pool holds is accounted for: the pool's own balance, open margin,
+    /// pending opens and what queued winners have been paid but not yet claimed.
     function invariant_tokensMatchBooks() public view {
         assertEq(
             usdc.balanceOf(address(pool)),
-            pool.poolBalance() + pool.longMargin() + pool.shortMargin() + pool.pendingOpens()
+            pool.poolBalance() + pool.longMargin() + pool.shortMargin() + pool.pendingOpens() + pool.unclaimed()
         );
     }
 
-    /// totalDebt is the queue's unpaid tail, and the pool keeps no balance while anyone waits.
+    /// The queue's counters agree with its entries, payment is in order (no entry is paid
+    /// while an earlier one is short), and the pool keeps no balance while anyone waits.
     function invariant_debtQueue() public view {
-        uint256 sum;
-        for (uint256 i = pool.debtHead();; i++) {
-            try pool.debts(i) returns (address, uint256 amount) {
-                sum += amount;
-            } catch {
-                break;
-            }
+        uint256 n = pool.debtCount();
+        uint256 owedOrUnclaimed;
+        uint256 claimable;
+        bool shortSeen;
+        for (uint256 i; i < n; i++) {
+            (, uint256 start, uint256 amount, uint256 claimed) = pool.debts(i);
+            owedOrUnclaimed += amount - claimed;
+            claimable += pool.claimable(i);
+            bool fullyPaid = pool.debtPaid() >= start + amount;
+            if (shortSeen) assertTrue(pool.debtPaid() <= start); // nothing after a short entry is paid
+            if (!fullyPaid) shortSeen = true;
         }
-        assertEq(pool.totalDebt(), sum);
+        assertEq(pool.totalDebt(), pool.debtQueued() - pool.debtPaid());
+        assertEq(owedOrUnclaimed, pool.totalDebt() + pool.unclaimed());
+        assertEq(claimable, pool.unclaimed());
         if (pool.totalDebt() != 0) assertEq(pool.poolBalance(), 0);
     }
 
@@ -285,10 +304,12 @@ contract LaunchPoolInvariantTest is Test {
 
     /// Shows how many of each action went through (forge test -vv).
     function afterInvariant() public {
-        string[9] memory names =
-            ["requestOpen", "cancelOpen", "requestClose", "settle", "liquidate", "poke", "rearm", "redeem", "changeParams"];
+        string[10] memory names = [
+            "requestOpen", "cancelOpen", "requestClose", "settle", "liquidate", "poke", "rearm", "redeem", "changeParams", "claim"
+        ];
         for (uint256 i; i < names.length; i++) {
             emit log_named_uint(names[i], h.calls(names[i]));
         }
+        emit log_named_uint("queued winners", pool.debtCount());
     }
 }

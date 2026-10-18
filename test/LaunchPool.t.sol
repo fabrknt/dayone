@@ -135,8 +135,12 @@ contract LaunchPoolTest is Test {
         vm.warp(block.timestamp + 60);
         close(bob, id2);
         assertEq(pool.totalDebt(), 0);
+        assertEq(pool.claimable(0), 757.5e6);
+        pool.claim(0); // anyone may send it; it goes to alice
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC + 757.5e6); // +807.50 - 50 open fee
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance()); // nothing open: tokens == books
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.claim(0); // nothing left
     }
 
     function test_capPerMinute() public {
@@ -922,5 +926,53 @@ contract LaunchPoolTest is Test {
         assertEq(q.feeBps, 7);
         assertEq(b.maxMarkOracleBps, 30);
         assertEq(at, block.timestamp + 1 days);
+    }
+
+    /// However many winners are queued, the loss that pays them all costs the same gas: the
+    /// queue is paid by a counter, and each winner's share is sent by claim().
+    function test_longDebtQueuePaidInConstantGas() public {
+        uint256 n = 200;
+        uint256[] memory ids = new uint256[](n);
+        vm.startPrank(alice);
+        for (uint256 i; i < n; i++) {
+            ids[i] = pool.requestOpen(true, 100 * USDC, 10); // $1,000 each, $0.50 open fee
+        }
+        vm.stopPrank();
+        vm.warp(block.timestamp + 3);
+        for (uint256 i; i < n; i++) {
+            pool.settle(ids[i]);
+        }
+        setPx(353_500); // +1%: each wins ($10 - $0.50) * 85% = $8.075; the pool holds $100 of fees
+        vm.startPrank(alice);
+        for (uint256 i; i < n; i++) {
+            pool.requestClose(ids[i]);
+        }
+        vm.stopPrank();
+        vm.warp(block.timestamp + 3);
+        for (uint256 i; i < n; i++) {
+            pool.settle(ids[i]);
+        }
+        uint256 queued = pool.debtCount();
+        assertGt(queued, 180);
+        assertEq(pool.totalDebt(), n * 8.075e6 - 100 * USDC);
+
+        vm.warp(block.timestamp + 60);
+        uint256 b = open(bob, true, 25_000 * USDC, 20); // $500K
+        vm.prank(bob);
+        pool.requestClose(b);
+        setPx(350_000); // -0.99%: bob's loss pays the whole queue
+        vm.warp(block.timestamp + 3);
+        uint256 g = gasleft();
+        pool.settle(b);
+        g -= gasleft();
+        emit log_named_uint("settle gas, paying the whole queue", g);
+        assertLt(g, 300_000); // the old loop sent one transfer per queued winner
+        assertEq(pool.totalDebt(), 0);
+
+        for (uint256 i; i < queued; i++) {
+            pool.claim(i);
+        }
+        assertEq(pool.unclaimed(), 0);
+        assertEq(usdc.balanceOf(address(pool)), pool.poolBalance()); // nothing open: tokens == books
     }
 }

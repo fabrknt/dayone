@@ -141,32 +141,46 @@ let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
 // The trading-hours pause: hoursPaused/setHoursPaused on pools with a pauser role. Pools deployed
 // before it (testnet 0x183A…) only have the one pause, so there the keeper uses
 // opensPaused/setOpensPaused with the operator key, as before.
+// Likewise queued winners: newer pools pay the queue by a counter and the keeper sends each
+// winner's paid part with claim(id); older pools send it inside settle and need nothing here.
 let pauseFns: { read: string; set: string } | undefined;
-async function detectPauseFns() {
+let claims: boolean | undefined;
+async function has(functionName: string) {
   try {
-    await read("pauser");
-    return { read: "hoursPaused", set: "setHoursPaused" };
+    await read(functionName);
+    return true;
   } catch (e) {
-    // only a contract that reverts on pauser() is an old pool; an RPC failure retries next tick
+    // only a contract that reverts is an old pool; an RPC failure retries next tick
     if (!(e instanceof BaseError && e.walk((x) => x instanceof ContractFunctionRevertedError || x instanceof ContractFunctionZeroDataError))) throw e;
-    console.log(`${new Date().toISOString()} pool has no pauser role: using setOpensPaused (operator key)`);
-    return { read: "opensPaused", set: "setOpensPaused" };
+    return false;
   }
 }
+async function detect() {
+  if (await has("pauser")) pauseFns = { read: "hoursPaused", set: "setHoursPaused" };
+  else {
+    console.log(`${new Date().toISOString()} pool has no pauser role: using setOpensPaused (operator key)`);
+    pauseFns = { read: "opensPaused", set: "setOpensPaused" };
+  }
+  claims = await has("unclaimed");
+}
+const CLAIMS_PER_TICK = 3; // a long queue drains over several ticks, inside the RPC budget
+const CLAIM_SCAN = 50n;
+let claimFrom = 0n; // every debt below this is fully claimed
 
 async function tick() {
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
   }
-  pauseFns ??= await detectPauseFns();
-  const [rawPx, rawNow, rawIds, rawPaused, rawParams, rawLatch] = await batch([
+  if (!pauseFns) await detect();
+  const [rawPx, rawNow, rawIds, rawPaused, rawParams, rawLatch, rawUnclaimed] = await batch([
     { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
     { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
     poolCall("activeIds"),
-    poolCall(pauseFns.read), // with a pauser role, the operator's own pause is separate and the keeper never clears it
+    poolCall(pauseFns!.read), // with a pauser role, the operator's own pause is separate and the keeper never clears it
     poolCall("getParams"), // every tick: a delay cut by applyParams must take effect at once
     poolCall("latch"),
+    ...(claims ? [poolCall("unclaimed")] : []),
   ]);
   const [px] = decodeAbiParameters([{ type: "uint64" }], rawPx);
   const oracle = (px as bigint) * asset.scale;
@@ -188,7 +202,7 @@ async function tick() {
       console.log(`${new Date().toISOString()} CALENDAR EXPIRED, opens stay paused: ${(e as Error).message}`);
       shouldPause = true;
     }
-    if (poolResult(pauseFns.read, rawPaused) !== shouldPause) await send(pauseFns.set, [shouldPause]);
+    if (poolResult(pauseFns!.read, rawPaused) !== shouldPause) await send(pauseFns!.set, [shouldPause]);
   }
 
   const settleDelay = BigInt(p.settleDelay);
@@ -213,7 +227,38 @@ async function tick() {
   // the order matters when the RPC budget is tight: what protects the pool first
   for (const id of liquidations) await send("liquidate", [id]);
   for (const id of settlements) await send("settle", [id]);
-  if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length === 0) await send("poke");
+  let claimed = 0;
+  if (rawUnclaimed && poolResult("unclaimed", rawUnclaimed) > 0n) claimed = await sendClaims();
+  if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length + claimed === 0) await send("poke");
+}
+
+/// Sends up to CLAIMS_PER_TICK winners their paid part, oldest first. Returns how many it sent.
+async function sendClaims(): Promise<number> {
+  const [rawCount, rawPaid] = await batch([poolCall("debtCount"), poolCall("debtPaid")]);
+  const count = poolResult("debtCount", rawCount) as bigint;
+  const paid = poolResult("debtPaid", rawPaid) as bigint;
+  const end = claimFrom + CLAIM_SCAN < count ? claimFrom + CLAIM_SCAN : count;
+  const ids: bigint[] = [];
+  for (let i = claimFrom; i < end; i++) ids.push(i);
+  const rows = ids.length ? await batch(ids.map((i) => poolCall("debts", [i]))) : [];
+  let sent = 0;
+  let front = true;
+  for (const [k, i] of ids.entries()) {
+    const [, start, amount, done] = poolResult("debts", rows[k]) as [Address, bigint, bigint, bigint];
+    if (start >= paid) break; // the queue is paid in order: nothing from here on is paid yet
+    const upTo = paid - start < amount ? paid - start : amount;
+    if (upTo > done && sent < CLAIMS_PER_TICK) {
+      if (await send("claim", [i])) {
+        sent++;
+        if (front && upTo === amount) claimFrom = i + 1n;
+        else front = false;
+        continue;
+      }
+    }
+    if (front && done === amount) claimFrom = i + 1n;
+    else front = false;
+  }
+  return sent;
 }
 
 do {

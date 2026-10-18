@@ -94,4 +94,24 @@ LOG=$(mktemp)
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
 grep -q "CALENDAR EXPIRED" $LOG && ! grep -q "tick failed" $LOG && echo "ok   calendar expiry logged, tick completed" || { cat $LOG; echo "FAIL calendar expiry"; exit 1; }
 check "paused past the calendar" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+echo "8. a fresh pool: a winner is queued, a later open fee pays part of it, the keeper sends it"
+px 350000
+forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
+POOL=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['pool'])")
+USDC=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['usdc'])")
+cast send -q --rpc-url $RPC --private-key $K0 $USDC "mint(address,uint256)" $T1 1000000000000
+cast send -q --rpc-url $RPC --private-key $K1 $USDC "approve(address,uint256)" $POOL 1000000000000
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" true 10000000000 10
+later 3; keeper
+px 353500  # +1%: ($1,000 - $50 close fee) * 85% = $807.50 owed, the pool holds the $50 open fee
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestClose(uint256)" 1
+later 3; keeper
+check "winner queued" "$(cast call --rpc-url $RPC $POOL "totalDebt()(uint256)" | cut -d' ' -f1)" 757500000
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" false 10000000000 10
+later 3; keeper  # settles: the $50 open fee goes to the queue
+check "fee paid into the queue" "$(cast call --rpc-url $RPC $POOL "unclaimed()(uint256)" | cut -d' ' -f1)" 50000000
+BEFORE=$(cast call --rpc-url $RPC $USDC "balanceOf(address)(uint256)" $T1 | cut -d' ' -f1)
+keeper
+check "keeper sent the winner's paid part" "$(cast call --rpc-url $RPC $POOL "unclaimed()(uint256)" | cut -d' ' -f1)" 0
+check "winner received \$50" "$(( $(cast call --rpc-url $RPC $USDC "balanceOf(address)(uint256)" $T1 | cut -d' ' -f1) - BEFORE ))" 50000000
 echo "all ok"
