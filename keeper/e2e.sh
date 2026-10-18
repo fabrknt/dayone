@@ -5,10 +5,12 @@ set -e
 cd "$(dirname "$0")/.."
 PORT=8546
 RPC=http://127.0.0.1:$PORT
-# anvil's well-known dev keys: 0 = operator and keeper, 1 = trader
+# anvil's well-known dev keys: 0 = operator and keeper, 1 = trader, 2 = pauser (the hours keeper, from step 5)
 K0=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 K1=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 T1=$(cast wallet address $K1)
+K2=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+P2=$(cast wallet address $K2)
 
 # chain time starts on Fri 2026-10-16 00:00 UTC, so the dated steps below (Sat 10-17, Mon 10-19, ...)
 # are always in the future, whatever day this runs
@@ -66,23 +68,30 @@ LOG=$(mktemp)
 keeper | tee $LOG
 grep -q "Breach Jump" $LOG && echo "ok   poke refused with a Jump breach" || { echo "FAIL no Jump breach"; exit 1; }
 check "position 2 not liquidated at the bad price" "$(entry 2)" 319658000000000000000
-echo "5. MARKET_HOURS=nyse: Saturday pauses new positions, Monday 10:00 ET reopens them"
+echo "5. MARKET_HOURS=nyse with the pauser key: Saturday pauses new positions, Monday 10:00 ET reopens them"
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "setPauser(address)" $P2
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792260000 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Sat 2026-10-17 18:00 UTC
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "paused on Saturday" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792418400 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2026-10-19 14:00 UTC = 10:00 EDT
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Monday 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
 echo "6. MARKET_HOURS=krx: Monday 23:00 KST pauses new positions, Tuesday 10:00 KST reopens them"
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792458000 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2026-10-20 01:00 UTC = 10:00 KST
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setOpensPaused" | sed 's/^[^ ]* /  keeper: /'
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Tuesday 10:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+echo "6b. the operator's own pause holds through trading hours: the pauser key cannot clear it"
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "setOpensPaused(bool)" true
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /' || true
+check "still paused at 10:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+cast send -q --rpc-url $RPC --private-key $K2 $POOL "setOpensPaused(bool)" false 2>/dev/null && { echo "FAIL pauser cleared the operator pause"; exit 1; } || echo "ok   pauser refused setOpensPaused"
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "setOpensPaused(bool)" false
 echo "7. past the calendar: opens stay paused and the keeper carries on"
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1799143200 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2027-01-05 10:00 UTC
 LOG=$(mktemp)
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
 grep -q "CALENDAR EXPIRED" $LOG && ! grep -q "tick failed" $LOG && echo "ok   calendar expiry logged, tick completed" || { cat $LOG; echo "FAIL calendar expiry"; exit 1; }
 check "paused past the calendar" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 echo "all ok"

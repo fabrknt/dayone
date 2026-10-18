@@ -3,7 +3,7 @@
 //   RPC_URL=... POOL=0x... PRIVATE_KEY=0x... node keeper/keeper.ts [--once]
 //
 // Every tick (TICK_MS, default 1 s; 3 s on the public RPC), after one batched read:
-//   1. with MARKET_HOURS=nyse or krx (operator key only), pause new positions while that
+//   1. with MARKET_HOURS=nyse or krx (the pool's pauser key, or the operator's), pause new positions while that
 //      exchange is closed: out of hours there is no independent stock price to check the
 //      deployer's oracle against. nyse for US stocks, krx for xyz:SKHX and xyz:SMSN;
 //   2. liquidate every open position below its stored maintenance at the current oracle;
@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import {
   createPublicClient, createWalletClient, http, custom, decodeAbiParameters, encodeAbiParameters,
   encodeFunctionData, decodeFunctionResult, parseAbi,
-  BaseError, ContractFunctionRevertedError, type Address, type Hex,
+  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { marketStatus as nyseStatus, CALENDAR_2026 as NYSE_2026 } from "./campana.mjs";
@@ -138,17 +138,33 @@ const poolResult = (functionName: string, data: Hex) =>
 const POKE_AT = Number(process.env.POKE_AT_FRACTION ?? 0.25);
 if (!(POKE_AT > 0 && POKE_AT < 1)) throw new Error(`POKE_AT_FRACTION must be in (0, 1), got ${process.env.POKE_AT_FRACTION}`);
 let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
+// The trading-hours pause: hoursPaused/setHoursPaused on pools with a pauser role. Pools deployed
+// before it (testnet 0x183A…) only have the one pause, so there the keeper uses
+// opensPaused/setOpensPaused with the operator key, as before.
+let pauseFns: { read: string; set: string } | undefined;
+async function detectPauseFns() {
+  try {
+    await read("pauser");
+    return { read: "hoursPaused", set: "setHoursPaused" };
+  } catch (e) {
+    // only a contract that reverts on pauser() is an old pool; an RPC failure retries next tick
+    if (!(e instanceof BaseError && e.walk((x) => x instanceof ContractFunctionRevertedError || x instanceof ContractFunctionZeroDataError))) throw e;
+    console.log(`${new Date().toISOString()} pool has no pauser role: using setOpensPaused (operator key)`);
+    return { read: "opensPaused", set: "setOpensPaused" };
+  }
+}
 
 async function tick() {
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
   }
+  pauseFns ??= await detectPauseFns();
   const [rawPx, rawNow, rawIds, rawPaused, rawParams, rawLatch] = await batch([
     { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
     { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
     poolCall("activeIds"),
-    poolCall("opensPaused"),
+    poolCall(pauseFns.read), // with a pauser role, the operator's own pause is separate and the keeper never clears it
     poolCall("getParams"), // every tick: a delay cut by applyParams must take effect at once
     poolCall("latch"),
   ]);
@@ -172,7 +188,7 @@ async function tick() {
       console.log(`${new Date().toISOString()} CALENDAR EXPIRED, opens stay paused: ${(e as Error).message}`);
       shouldPause = true;
     }
-    if (poolResult("opensPaused", rawPaused) !== shouldPause) await send("setOpensPaused", [shouldPause]);
+    if (poolResult(pauseFns.read, rawPaused) !== shouldPause) await send(pauseFns.set, [shouldPause]);
   }
 
   const settleDelay = BigInt(p.settleDelay);

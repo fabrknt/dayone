@@ -472,6 +472,66 @@ contract LaunchPoolTest is Test {
         pool.graduate();
     }
 
+    /// The pauser (the keeper's key) can set and clear the trading-hours pause and nothing else.
+    function test_pauserOnlyTogglesHours() public {
+        address keeper = address(0x6EE9E2);
+        pool.setPauser(keeper);
+        vm.startPrank(keeper);
+        pool.setHoursPaused(true);
+        assertTrue(pool.opensPaused());
+        pool.setHoursPaused(false);
+        assertFalse(pool.opensPaused());
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        pool.setOpensPaused(true);
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        pool.graduate();
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        pool.rearm(350 ether);
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        pool.proposeParams(defaultParams(), HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        pool.setPauser(keeper);
+        vm.stopPrank();
+
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.NotPauser.selector);
+        pool.setHoursPaused(true);
+
+        pool.setPauser(address(0)); // removed: the old key is refused
+        vm.prank(keeper);
+        vm.expectRevert(LaunchPool.NotPauser.selector);
+        pool.setHoursPaused(true);
+    }
+
+    /// The keeper reopening at market open does not clear the operator's own pause.
+    function test_operatorPauseOutlivesHoursReopen() public {
+        address keeper = address(0x6EE9E2);
+        pool.setPauser(keeper);
+        vm.prank(keeper);
+        pool.setHoursPaused(true);
+        pool.setOpensPaused(true); // operator emergency
+        vm.prank(keeper);
+        pool.setHoursPaused(false); // market opens
+        assertTrue(pool.opensPaused());
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        pool.requestOpen(true, 1_000 * USDC, 10);
+        pool.setOpensPaused(false);
+        assertFalse(pool.opensPaused());
+        open(alice, true, 1_000 * USDC, 10);
+    }
+
+    /// The hours pause alone also satisfies applyParams' pause requirement for a cap raise.
+    function test_hoursPauseCountsForCapRaise() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.capWindow = 120;
+        pool.proposeParams(p, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.warp(block.timestamp + 1 days);
+        pool.setHoursPaused(true); // the operator may set it too
+        pool.applyParams();
+        assertEq(pool.getParams().capWindow, 120);
+    }
+
     // ---- regressions for Codex round 3 (Codex's reruns, kept as written) ----
 
     function test_r3_repeatedCappedMintsNoLongerDrainReserve() public {
@@ -746,5 +806,121 @@ contract LaunchPoolTest is Test {
         emit log_named_uint("shares minted to the old loser", minted);
         emit log_named_int("pair net (USDC units)", pair);
         assertLt(pair, 0);
+    }
+
+    // ---- paths the earlier tests left out (coverage, 10-19) ----
+
+    /// A real gap trips the latch until the operator rearms at the new price.
+    function test_rearmAfterGap() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        setPx(357_500); // +2.14% in one step, past the 2% latch
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.Jump, 215, 200));
+        pool.poke();
+        pool.rearm(357.5e18);
+        (uint256 anchor,) = pool.latch();
+        assertEq(anchor, 357.5e18);
+        pool.poke();
+        vm.warp(block.timestamp + 60);
+        close(alice, id); // settles at the new price
+        assertGt(usdc.balanceOf(alice), 1_000_000 * USDC - 10 * USDC);
+    }
+
+    /// The price runs through the liquidation level before anyone liquidates and the close
+    /// settles: the loss is capped at the margin and the trader gets nothing back.
+    function test_closePastLiquidationLosesOnlyMargin() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 20); // $20K notional, $10 open fee
+        vm.prank(alice);
+        pool.requestClose(id);
+        setPx(343_000);
+        pool.poke();
+        setPx(336_140);
+        pool.poke();
+        setPx(330_000); // -5.71%: loss $1,142.86 + $10 close fee > $1,000 margin
+        vm.warp(block.timestamp + 3);
+        pool.settle(id);
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 1_010 * USDC);
+        assertEq(pool.poolBalance(), 1_010 * USDC);
+        assertEq(pool.shares(alice), 118.8e6); // 12% of ($1,000 - $10 fee)
+        assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
+    }
+
+    function test_refusesOutOfTurnCalls() public {
+        vm.prank(alice);
+        uint256 pending = pool.requestOpen(true, 1_000 * USDC, 10);
+        vm.prank(bob);
+        vm.expectRevert(LaunchPool.NotOwner.selector);
+        pool.cancelOpen(pending);
+        vm.prank(bob);
+        vm.expectRevert(LaunchPool.NotOwner.selector);
+        pool.requestClose(pending);
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.requestClose(pending); // not open yet
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.liquidate(pending);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.settle(999); // no such position
+
+        // paused after the request: the open cannot settle, and the trader can take the money back
+        pool.setOpensPaused(true);
+        vm.warp(block.timestamp + 3);
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        pool.settle(pending);
+        vm.prank(alice);
+        pool.cancelOpen(pending);
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC);
+        assertEq(pool.pendingOpens(), 0);
+        pool.setOpensPaused(false);
+
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.cancelOpen(id); // already open
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.settle(id); // open, no close requested
+        vm.prank(alice);
+        pool.requestClose(id);
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.requestClose(id); // twice
+
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.redeem(0);
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.redeem(1); // holds none
+    }
+
+    function test_paramsValidationEachBound() public {
+        LaunchPool.Params[11] memory bad;
+        for (uint256 i; i < bad.length; i++) {
+            bad[i] = defaultParams();
+        }
+        bad[0].redeemBufferBps = 99;
+        bad[1].minNotional = 0;
+        bad[2].minNotional = bad[2].maxNotional + 1;
+        bad[3].capWindow = 5;
+        bad[4].capWindow = 61;
+        bad[5].maxLeverage = 0;
+        bad[6].winHaircutBps = 10_001;
+        bad[7].feeBps = 1_001;
+        bad[8].maintenanceBps = 0;
+        bad[9].maintenanceBps = 10_001;
+        bad[10].haircutToMoveBps = 10_001;
+        for (uint256 i; i < bad.length; i++) {
+            vm.expectRevert(LaunchPool.BadParams.selector);
+            pool.proposeParams(bad[i], HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        }
+    }
+
+    function test_pendingParamsShowsProposal() public {
+        LaunchPool.Params memory p = defaultParams();
+        p.feeBps = 7;
+        pool.proposeParams(p, HLPriceGuard.Bounds(30, 30, 20, 150), IRefSource(address(0)));
+        (LaunchPool.Params memory q, HLPriceGuard.Bounds memory b,, uint64 at) = pool.pendingParams();
+        assertEq(q.feeBps, 7);
+        assertEq(b.maxMarkOracleBps, 30);
+        assertEq(at, block.timestamp + 1 days);
     }
 }

@@ -48,6 +48,8 @@ contract DeployTestnet is Script {
             0,
             1 days // paramsDelay
         );
+        address pauser = vm.envOr("PAUSER", address(0)); // the keeper's key: trading-hours pause only
+        if (pauser != address(0)) pool.setPauser(pauser);
         vm.stopBroadcast();
         console.log("usdc", address(token));
         console.log("pool", address(pool));

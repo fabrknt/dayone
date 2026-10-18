@@ -81,6 +81,7 @@ contract LaunchPool {
     IERC20 public immutable collateral;
     uint64 public immutable paramsDelay;
     address public operator;
+    address public pauser; // may only pause and resume opens for trading hours (the keeper)
     HLPriceGuard.Asset public asset;
     HLPriceGuard.Bounds public bounds;
     IRefSource public refSource;
@@ -91,7 +92,8 @@ contract LaunchPool {
     IRefSource internal _pendingRef;
     uint64 public pendingAt; // 0 = nothing pending
 
-    bool public opensPaused; // out of trading hours, or by the operator
+    bool public operatorPaused; // set and cleared by the operator only
+    bool public hoursPaused; // out of trading hours: set and cleared by the pauser or the operator
     bool public graduated; // book is deep enough: no new opens, closes still settle
 
     uint256 public poolBalance; // collateral the pool can pay out from
@@ -131,8 +133,10 @@ contract LaunchPool {
     event Redeemed(address indexed by, uint256 shares, uint256 amount);
     event ParamsProposed(uint64 effectiveAt);
     event ParamsApplied();
+    event PauserSet(address pauser);
 
     error NotOperator();
+    error NotPauser();
     error NotOwner();
     error OpensClosed();
     error BadRequest();
@@ -179,6 +183,11 @@ contract LaunchPool {
 
     // ---- views ----
 
+    /// New opens are refused while either the operator or trading hours hold them.
+    function opensPaused() public view returns (bool) {
+        return operatorPaused || hoursPaused;
+    }
+
     function getParams() external view returns (Params memory) {
         return _params;
     }
@@ -201,8 +210,22 @@ contract LaunchPool {
 
     // ---- operator ----
 
+    /// The operator's own pause. The pauser cannot clear it.
     function setOpensPaused(bool p) external onlyOperator {
-        opensPaused = p;
+        operatorPaused = p;
+    }
+
+    /// address(0) removes the pauser.
+    function setPauser(address p) external onlyOperator {
+        pauser = p;
+        emit PauserSet(p);
+    }
+
+    // ---- pauser ----
+
+    function setHoursPaused(bool p) external {
+        if (msg.sender != pauser && msg.sender != operator) revert NotPauser();
+        hoursPaused = p;
     }
 
     function graduate() external onlyOperator {
@@ -229,7 +252,7 @@ contract LaunchPool {
         // Raising the cap or changing the window waits until nothing settled under the old one is
         // in the window. With opens paused that is bounded: each open position closes only once.
         // Otherwise a trader could recycle a small position to keep the lanes busy forever.
-        if (!lowerCapOnly && !opensPaused) revert OpensClosed();
+        if (!lowerCapOnly && !opensPaused()) revert OpensClosed();
         if (p.capPerWindow != _params.capPerWindow || p.capWindow != _params.capWindow) {
             _openLane.reconfigure(p.capPerWindow, p.capWindow);
             _closeLane.reconfigure(p.capPerWindow, p.capWindow);
@@ -251,7 +274,7 @@ contract LaunchPool {
 
     function requestOpen(bool long, uint256 margin, uint16 leverage) external nonReentrant returns (uint256 id) {
         Params storage P = _params;
-        if (opensPaused || graduated) revert OpensClosed();
+        if (opensPaused() || graduated) revert OpensClosed();
         if (margin == 0 || leverage == 0 || leverage > P.maxLeverage) revert BadRequest();
         uint256 notional = margin * leverage;
         if (notional < P.minNotional || notional > P.maxNotional) revert BadRequest();
@@ -306,7 +329,7 @@ contract LaunchPool {
         uint256 notional = p.margin * p.leverage;
         uint256 price = _price();
         if (p.entry == 0) {
-            if (opensPaused || graduated) revert OpensClosed();
+            if (opensPaused() || graduated) revert OpensClosed();
             _openLane.spend(notional, _params.capPerWindow, _params.capWindow);
             _addOI(p.long, notional, p.margin, price);
             uint256 net = _net();

@@ -78,8 +78,12 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
    run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
-   `MARKET_HOURS=nyse` pauses new positions while NYSE is closed (the operator key is needed for
-   that); use `krx` for xyz:SKHX or xyz:SMSN.
+   `MARKET_HOURS=nyse` pauses new positions while NYSE is closed; use `krx` for xyz:SKHX or xyz:SMSN.
+   That needs the pool's pauser key (`PAUSER=<keeper address>` at step 3, or later
+   `cast send $POOL "setPauser(address)" <keeper address>` from the operator key) or the operator key.
+   Give the keeper the pauser key, not the operator key: the pauser can only set and clear the
+   trading-hours pause (`setHoursPaused`), never `graduate`, `proposeParams`, `rearm` or the
+   operator's own pause (`setOpensPaused`), which the keeper therefore cannot undo.
 5. Open the page with `?net=testnet&pool=$POOL&usdc=$USDC` and a browser wallet on chain 998.
 
 What testnet adds over `keeper/e2e.sh`: the real precompiles and a deployer's real oracle
