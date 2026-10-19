@@ -39,10 +39,11 @@ contract LaunchPool {
     /// HL perp prices have `6 - szDecimals` decimals, so szDecimals is at most 6. Larger values
     /// would scale prices far enough to overflow the PnL and equity products.
     uint8 public constant MAX_SZ_DECIMALS = 6;
-    /// A rebate that would push the share count past this is paid as a claim on the pool
-    /// instead (see _credit), so a share price driven toward zero can never overflow the count
-    /// and block a close or liquidation, and holders never keep the rebate.
+    /// A mint that would push the share count past this first divides every holding by
+    /// REBASE (see _rebase), so a share price driven toward zero can never overflow the count
+    /// and block a close or liquidation, and the rebate keeps being paid in shares.
     uint256 public constant MAX_SHARES = 2 ** 128;
+    uint256 public constant REBASE = 2 ** 64;
 
     struct Params {
         uint16 maxLeverage;
@@ -111,7 +112,9 @@ contract LaunchPool {
 
     uint256 public poolBalance; // collateral the pool can pay out from
     uint256 public totalShares;
-    mapping(address => uint256) public shares; // shares[address(this)] = locked, never redeemable
+    mapping(address => uint256) internal _shares; // _shares[address(this)] = locked, never redeemable
+    mapping(address => uint64) internal _shareEpoch; // the rebase each holding was last brought to
+    uint64 public shareEpoch; // how many times holdings have been divided by REBASE
     uint256 public minReserve; // never redeemable
 
     Debt[] public debts;
@@ -145,7 +148,7 @@ contract LaunchPool {
     event Closed(uint256 indexed id, uint256 exit, int256 pnl, uint256 paid, uint256 queued);
     event Liquidated(uint256 indexed id, uint256 price, uint256 lost);
     event SharesMinted(address indexed to, uint256 lossAmount, uint256 shares, uint256 locked);
-    event RebateCredited(address indexed to, uint256 debtId, uint256 amount);
+    event SharesRebased(uint64 epoch, uint256 totalShares);
     event Redeemed(address indexed by, uint256 shares, uint256 amount);
     event ParamsProposed(uint64 effectiveAt);
     event ParamsApplied();
@@ -414,13 +417,13 @@ contract LaunchPool {
     /// Burn shares for their part of the pool's equity, at the guarded oracle. Blocked while
     /// winners are queued, and limited to equity above minReserve plus a buffer on net OI.
     function redeem(uint256 amountShares) external nonReentrant returns (uint256 amount) {
-        if (totalDebt != 0 || amountShares == 0 || amountShares > shares[msg.sender]) revert BadRequest();
+        if (totalDebt != 0 || amountShares == 0 || amountShares > _syncShares(msg.sender)) revert BadRequest();
         uint256 eq = equity(_price());
         amount = amountShares * eq / totalShares;
         uint256 hold = minReserve + _net() * _params.redeemBufferBps / 10_000;
         uint256 available = eq > hold ? eq - hold : 0;
         if (amount == 0 || amount > available) revert RedeemBlocked(amount, available);
-        shares[msg.sender] -= amountShares;
+        _shares[msg.sender] -= amountShares;
         totalShares -= amountShares;
         poolBalance -= amount;
         collateral.transfer(msg.sender, amount);
@@ -609,17 +612,26 @@ contract LaunchPool {
         poolBalance += amount - pay;
     }
 
-    /// A rebate the share count cannot hold, owed like a winner's profit: paid now from the
-    /// balance when nobody is waiting (claim(id) sends it), otherwise queued behind them.
-    function _credit(address to, uint256 amount) internal {
-        uint256 paid = amount < poolBalance ? amount : poolBalance; // poolBalance is 0 while anyone waits
-        emit RebateCredited(to, debts.length, amount);
-        debts.push(Debt(to, debtQueued, amount, 0));
-        debtQueued += amount;
-        debtPaid += paid;
-        totalDebt += amount - paid;
-        poolBalance -= paid;
-        unclaimed += paid;
+    /// A holder's shares after the rebases since it was last touched; each rounds down.
+    function shares(address a) public view returns (uint256) {
+        uint256 behind = shareEpoch - _shareEpoch[a];
+        return behind >= 3 ? 0 : _shares[a] >> (64 * behind); // a holding is at most 2^128
+    }
+
+    function _syncShares(address a) internal returns (uint256 s_) {
+        s_ = shares(a);
+        _shares[a] = s_;
+        _shareEpoch[a] = shareEpoch;
+    }
+
+    /// Divide every holding by REBASE, lazily: holdings catch up when read or touched. Each
+    /// holding rounds down and the total rounds up, so the holdings never add up to more than
+    /// totalShares and redemption never pays out more than the equity. Only reached when a
+    /// share is worth well under a base unit, so what a holder loses to rounding is dust.
+    function _rebase() internal {
+        shareEpoch += 1;
+        totalShares = (totalShares + REBASE - 1) / REBASE;
+        emit SharesRebased(shareEpoch, totalShares);
     }
 
     /// Shares worth `rebateBps` (the position's own, fixed at request) of the loss, priced at
@@ -640,10 +652,14 @@ contract LaunchPool {
             locked = v - value;
         } else {
             s_ = value * totalShares / (v - value);
+            while (totalShares + s_ > MAX_SHARES) {
+                // value < 2^60 and v - value >= 1, so after one rebase s_ < 2^124
+                _rebase();
+                s_ = value * totalShares / (v - value);
+            }
         }
-        if (totalShares + s_ + locked > MAX_SHARES) return _credit(to, value);
-        shares[to] += s_;
-        if (locked != 0) shares[address(this)] += locked;
+        _shares[to] = _syncShares(to) + s_;
+        if (locked != 0) _shares[address(this)] = _syncShares(address(this)) + locked;
         totalShares += s_ + locked;
         emit SharesMinted(to, loss, s_, locked);
     }

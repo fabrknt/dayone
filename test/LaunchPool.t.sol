@@ -880,8 +880,7 @@ contract LaunchPoolTest is Test {
     }
 
     /// Codex round 10: the arithmetic limits. Prices beyond HL's scale are refused at deploy;
-    /// fees round up; a rebate that would overflow the share count is skipped and the loss
-    /// still settles.
+    /// fees round up; a mint that would overflow the share count rebases every holding first.
     function test_r10_arithmeticLimits() public {
         HLPriceGuard.Bounds memory b = HLPriceGuard.Bounds(25, 25, 20, 150);
         vm.expectRevert(LaunchPool.BadParams.selector);
@@ -899,26 +898,24 @@ contract LaunchPoolTest is Test {
         close(alice, id); // a small loss: the first mint
         assertGt(pool.totalShares(), 0);
         vm.store(address(pool), bytes32(uint256(22)), bytes32(pool.MAX_SHARES() - 1)); // totalShares
-        uint256 total = pool.totalShares();
         id = open(bob, true, 1_000 * USDC, 10);
         setPx(344_750);
         pool.poke();
         setPx(340_000);
         uint256 balance = pool.poolBalance();
-        uint256 n = pool.debtCount();
         uint256 bobBefore = usdc.balanceOf(bob);
         close(bob, id); // a loss from 349 to 340: the rebate would overflow MAX_SHARES
         uint256 loss = 1_000 * USDC - (usdc.balanceOf(bob) - bobBefore); // includes the $5 close fee
-        assertEq(pool.shares(bob), 0);
-        assertEq(pool.totalShares(), total);
-        // paid as a claim instead, so the holders do not keep it
-        (address to,, uint256 amount,) = pool.debts(n);
-        assertEq(to, bob);
-        assertEq(amount, (loss - 5 * USDC) * 1200 / 10_000);
-        assertEq(pool.claimable(n), amount);
-        assertEq(pool.poolBalance(), balance + loss - amount);
-        pool.claim(n);
-        assertEq(usdc.balanceOf(bob), bobBefore + 1_000 * USDC - loss + amount);
+        uint256 bobShares = pool.shares(bob);
+        assertGt(bobShares, 0);
+        // every holding was divided by 2^64 first, and bob's rebate is still paid in shares
+        assertEq(pool.shareEpoch(), 1);
+        assertEq(pool.totalShares(), 2 ** 64 + bobShares);
+        uint256 value = (loss - 5 * USDC) * 1200 / 10_000;
+        assertEq(bobShares, value * 2 ** 64 / (pool.shareValuation() - value));
+        assertEq(pool.shares(alice), 0); // her few real shares round down to nothing: dust
+        assertLe(pool.shares(alice) + pool.shares(bob) + pool.shares(address(pool)), pool.totalShares());
+        assertEq(pool.poolBalance(), balance + loss);
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance() + pool.pendingOpens()); // alice's open still pending
     }
 
