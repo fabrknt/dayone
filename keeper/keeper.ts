@@ -102,6 +102,7 @@ function why(e: unknown): string {
 /// logged, not sent. Only a receipt with status success counts as done.
 const SMALL_BLOCK_GAS = 2_000_000n;
 async function send(functionName: string, args: unknown[] = []): Promise<boolean> {
+  let hash: Hex | undefined;
   try {
     const { request } = await pub.simulateContract({ account, address: pool, abi, functionName, args });
     const gas = await pub.estimateContractGas({ account, address: pool, abi, functionName, args });
@@ -111,7 +112,7 @@ async function send(functionName: string, args: unknown[] = []): Promise<boolean
     }
     const padded = (gas * 13n) / 10n;
     const limit = padded < SMALL_BLOCK_GAS ? padded : SMALL_BLOCK_GAS - 1n;
-    const hash = await wallet.writeContract({ ...request, gas: limit });
+    hash = await wallet.writeContract({ ...request, gas: limit });
     const receipt = await pub.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {
       console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) REVERTED on chain ${hash} (gas ${receipt.gasUsed})`);
@@ -120,7 +121,10 @@ async function send(functionName: string, args: unknown[] = []): Promise<boolean
     console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
     return true;
   } catch (e) {
-    console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) skipped: ${why(e)}`);
+    // a failed receipt read (e.g. the RPC's rate limit) after the send says nothing about the tx:
+    // it may have gone through. Logged as unknown; the next tick reads the state either way.
+    const what = hash ? `sent ${hash}, result unknown` : "skipped";
+    console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ${what}: ${why(e)}`);
     return false;
   }
 }

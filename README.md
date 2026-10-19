@@ -66,7 +66,7 @@ When to retire the pool (graduation criteria, a deadline, stop conditions, what 
 undecided with the operator): `docs/graduation.md` (Japanese, a draft until an operator signs on).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (54 tests, including regressions for review
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (55 tests, including regressions for review
   findings: `test_r1_*` to `test_r12_*`), `test/Invariant.t.sol` (5 invariants over random sequences
   of every action, parameter changes, latch trips, rearms and seeds; after each step: tokens == books, the debt queue's
   counters and order, per-side totals == positions, shares add up, equity <= shareValuation).
@@ -135,6 +135,10 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
-close positions left open after graduation (`docs/graduation.md`, to settle with an operator).
+close positions left open after graduation (`docs/graduation.md`, to settle with an operator);
+whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
+exact instead of assumed, at the cost of capped wins (as hyperevm-perp and hyperevm-knockout do);
+the independent reference (`maxRefOracleBps` is 0 on testnet; `PythRef` needs Hermes update data,
+which has required an API key since 2026-08-26).
 
-`forge test` (59 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+`forge test` (60 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.

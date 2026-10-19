@@ -924,8 +924,13 @@ contract LaunchPoolTest is Test {
     }
 
     function _backedPool() internal returns (LaunchPool p) {
+        p = _backedPool(1000);
+    }
+
+    function _backedPool(uint16 redeemBufferBps) internal returns (LaunchPool p) {
         LaunchPool.Params memory params = defaultParams();
         params.stressMoveBps = 1000;
+        params.redeemBufferBps = redeemBufferBps;
         p = new LaunchPool(
             IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), params, 0, 1 days
         );
@@ -1004,6 +1009,44 @@ contract LaunchPoolTest is Test {
         assertEq(p.longEntryMin(), 350e18);
         p.refreshEntryBounds();
         assertEq(p.longEntryMin(), 455e18);
+    }
+
+    /// From the lend window (10-19): two longs on one side, a crash trips the latch, the operator
+    /// rearms, and a holder redeems before the long past its margin is liquidated. The redemption
+    /// must leave enough for the other long's win: the overloss does not offset it.
+    function test_redeemAfterRearmKeepsTheSameSideWin() public {
+        LaunchPool p = _backedPool(100); // the smallest buffer, so it cannot hide a netting bound
+        p.seed(50_000 * USDC);
+        uint256 cheap = _requestAndWait(p, alice, true, 100 * USDC, 20); // $2K at $350
+        p.settle(cheap);
+        for (uint256 i = 1; i <= 15; i++) { // up to $455 in latch-sized steps
+            setPx(uint64(350_000 + 7_000 * i));
+            p.poke();
+        }
+        uint256 dear = _requestAndWait(p, bob, true, 1_000 * USDC, 20); // $20K at $455
+        p.settle(dear);
+
+        setPx(420_000); // -7.7% in one update: the latch trips
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        p.liquidate(dear);
+        p.rearm(420e18);
+        // cheap is up 20%: $400, $340 after the 15% haircut. dear is down 7.7% at 20x: $1,538 on
+        // $1,000 of margin. Netting the $538 overloss against the win would reserve nothing for
+        // it, and the 1% buffer holds back only $220.
+        uint256 eq = p.equity(420e18);
+        uint256 hold = p.minReserve() + (p.longOI() - p.shortOI()) / 100;
+        p.redeem(p.totalShares() * (eq - hold) / eq);
+
+        // the winner closes before the loser is liquidated, so its margin cannot help
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        p.requestClose(cheap);
+        vm.warp(block.timestamp + 3);
+        p.settle(cheap);
+        assertEq(p.totalDebt(), 0); // the win was paid in full from what the redemption left
+        p.liquidate(dear);
+        assertGt(usdc.balanceOf(alice) - aliceBefore, 430 * USDC); // $100 margin + $340 - the $1 close fee
+        assertEq(usdc.balanceOf(address(p)), p.poolBalance() + p.unclaimed());
     }
 
     /// Codex round 12: a new long at a new low entry re-prices the old longs. The page's room
