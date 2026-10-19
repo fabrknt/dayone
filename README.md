@@ -63,7 +63,7 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   Multicall3 and one budget for every RPC request (`RPC_PER_MIN`, default 90; the public RPC
   allows 100), gas limits padded 30% under the 2M small-block cap (`TICK_MS`, default 1 s); with
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
-  (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
+  (`keeper/campana.mjs` for NYSE, 2026 and 2027; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
   outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
   `POOL_ABI=v1` for a pool deployed before the pauser role and `claim()` (testnet 0x183A…), set
@@ -104,7 +104,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); calendars beyond 2026 and other exchanges; a claim button in the
+on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; a claim button in the
 web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (51 tests); `npm install && ./keeper/e2e.sh` (21 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
+`forge test` (51 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.

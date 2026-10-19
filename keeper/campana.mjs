@@ -1,4 +1,5 @@
 // Copied from vrdct core/campana.mjs @ 1dd15de (NYSE 2026 calendar, US Eastern DST). Keep in sync by hand.
+// CALENDAR_2027 is Day One's own addition (nyse.com/markets/hours-calendars, checked 2026-10-19).
 // Vrdct core — Campana: neutral, re-executable US-equities market status. Deterministic:
 // status is a PURE function of (unix timestamp, holiday calendar) — no clock read in the core, so
 // anyone re-executes it. Used by the closed-market-soundness claim-type; reusable by any surface
@@ -15,6 +16,16 @@ export const CALENDAR_2026 = {
   validUntil: Date.UTC(2027, 0, 1) / 1000,
   holidays: ['2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25', '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25'],
   halfDays: ['2026-11-27', '2026-12-24'],
+};
+
+export const CALENDAR_2027 = {
+  version: 2027_01,
+  validFrom: Date.UTC(2027, 0, 1) / 1000,
+  validUntil: Date.UTC(2028, 0, 1) / 1000,
+  // Juneteenth, Independence Day and Christmas fall on weekends and are observed on 06-18,
+  // 07-05 and 12-24. 2028-01-01 is a Saturday: NYSE observes no New Year's holiday for it.
+  holidays: ['2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24'],
+  halfDays: ['2027-11-26'],
 };
 
 const REG_OPEN_MIN = 9 * 60 + 30, REG_CLOSE_MIN = 16 * 60, HALF_CLOSE_MIN = 13 * 60;

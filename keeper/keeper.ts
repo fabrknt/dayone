@@ -25,7 +25,7 @@ import {
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { marketStatus as nyseStatus, CALENDAR_2026 as NYSE_2026 } from "./campana.mjs";
+import { marketStatus as nyseStatus, CALENDAR_2026, CALENDAR_2027 } from "./campana.mjs";
 import { marketStatus as krxStatus } from "./krx.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
@@ -65,9 +65,11 @@ const wallet = createWalletClient({ account, transport: limited });
 const once = process.argv.includes("--once");
 const marketHours = process.env.MARKET_HOURS; // "nyse", "krx" or unset
 // campana.mjs does not check its own range; krx.mjs throws outside it. Both end up the same here.
+const NYSE_CALENDARS = [CALENDAR_2026, CALENDAR_2027];
 const nyseChecked = (ts: number) => {
-  if (ts < NYSE_2026.validFrom || ts >= NYSE_2026.validUntil) throw new Error(`NYSE calendar ${NYSE_2026.version} does not cover ${ts}`);
-  return nyseStatus(ts);
+  const cal = NYSE_CALENDARS.find((c) => ts >= c.validFrom && ts < c.validUntil);
+  if (!cal) throw new Error(`no NYSE calendar covers ${ts}`);
+  return nyseStatus(ts, cal);
 };
 const hoursFn = ({ nyse: nyseChecked, krx: krxStatus } as Record<string, (ts: number) => { status: string }>)[marketHours ?? ""];
 if (marketHours && !hoursFn) throw new Error(`MARKET_HOURS must be nyse or krx, got ${marketHours}`);

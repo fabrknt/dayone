@@ -88,8 +88,14 @@ RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=
 check "still paused at 10:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 cast send -q --rpc-url $RPC --private-key $K2 $POOL "setOpensPaused(bool)" false 2>/dev/null && { echo "FAIL pauser cleared the operator pause"; exit 1; } || echo "ok   pauser refused setOpensPaused"
 cast send -q --rpc-url $RPC --private-key $K0 $POOL "setOpensPaused(bool)" false
-echo "7. past the calendar: opens stay paused and the keeper carries on"
-cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1799143200 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2027-01-05 10:00 UTC
+echo "7. into 2027: New Year's Day stays paused, Monday 10:00 ET reopens; past 2027 opens stay paused and the keeper carries on"
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1798815600 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Fri 2027-01-01 10:00 ET, holiday
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
+check "paused on 2027-01-01" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1799074800 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2027-01-04 10:00 ET
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
+check "open on 2027-01-04 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1830610800 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Tue 2028-01-04 10:00 ET, no calendar
 LOG=$(mktemp)
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
 grep -q "CALENDAR EXPIRED" $LOG && ! grep -q "tick failed" $LOG && echo "ok   calendar expiry logged, tick completed" || { cat $LOG; echo "FAIL calendar expiry"; exit 1; }
