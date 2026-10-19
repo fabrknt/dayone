@@ -975,4 +975,34 @@ contract LaunchPoolTest is Test {
         assertEq(pool.unclaimed(), 0);
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance()); // nothing open: tokens == books
     }
+
+    /// A winner the token refuses to pay (e.g. blacklisted) holds up nobody: settles still pay
+    /// the queue, and the next winner claims.
+    function test_blockedWinnerDoesNotBlockOthers() public {
+        uint256 a = open(alice, true, 10_000 * USDC, 10);
+        uint256 b = open(bob, true, 10_000 * USDC, 10);
+        setPx(353_500); // +1%: each is owed $807.50; the pool holds $100 of open fees
+        vm.warp(block.timestamp + 60);
+        close(alice, a); // debt 0: $707.50
+        close(bob, b); // debt 1: $807.50
+        usdc.setBlocked(alice, true);
+
+        address carol = address(0xCA201);
+        usdc.mint(carol, 100_000 * USDC);
+        vm.prank(carol);
+        usdc.approve(address(pool), type(uint256).max);
+        vm.warp(block.timestamp + 60);
+        uint256 c = open(carol, true, 25_000 * USDC, 20);
+        setPx(350_000);
+        vm.warp(block.timestamp + 60);
+        close(carol, c); // the loss pays both debts in full
+        assertEq(pool.totalDebt(), 0);
+
+        vm.expectRevert(bytes("blocked"));
+        pool.claim(0);
+        uint256 before = usdc.balanceOf(bob);
+        pool.claim(1);
+        assertEq(usdc.balanceOf(bob) - before, 807.5e6);
+        assertEq(pool.claimable(0), 707.5e6); // still there if alice is unblocked
+    }
 }

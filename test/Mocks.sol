@@ -19,6 +19,11 @@ contract MockPrecompile {
 contract MockUSDC {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => bool) public blocked; // like USDC's blacklist: transfers to it revert
+
+    function setBlocked(address a, bool b) external {
+        blocked[a] = b;
+    }
 
     function mint(address to, uint256 a) external {
         balanceOf[to] += a;
@@ -30,6 +35,7 @@ contract MockUSDC {
     }
 
     function transfer(address to, uint256 a) external returns (bool) {
+        require(!blocked[to], "blocked");
         balanceOf[msg.sender] -= a;
         balanceOf[to] += a;
         return true;
