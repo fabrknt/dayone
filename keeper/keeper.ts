@@ -160,6 +160,7 @@ function intEnv(name: string, dflt: number, max: number) {
   return v;
 }
 const CLAIMS_PER_TICK = intEnv("CLAIMS_PER_TICK", 3, 20); // a long queue drains over several ticks, inside the RPC budget
+const OPENS_PER_TICK = intEnv("OPENS_PER_TICK", 5, 50); // pending opens tried per tick, after every close
 const CLAIM_SCAN = BigInt(intEnv("CLAIM_SCAN", 50, 200)); // debts read per tick (e2e sets 1 to test the rotation)
 let claimFrom = 0n; // every debt below this is fully claimed
 // Where the next scan starts; it rotates over the paid part of the queue. A fresh process starts
@@ -167,7 +168,9 @@ let claimFrom = 0n; // every debt below this is fully claimed
 // a keeper that keeps restarting still reaches every debt behind a claim that always fails.
 let scanAt: bigint | undefined;
 // A pending open that would not settle (beyond the pool's backing, paused, queued winners) is
-// retried after 1, 2, 4 … 64 ticks, so a pile of them cannot use up the RPC budget closes need.
+// retried after roughly 1, 2, 4 … 64 ticks, jittered so a pile of them does not come due
+// together, and at most OPENS_PER_TICK are tried a tick (the longest-waiting first). A close or
+// liquidation that goes through can make room, so it makes every pending open due again.
 let tickNo = 0;
 const openRetry = new Map<bigint, { at: number; wait: number }>();
 let refreshedAt = -Infinity;
@@ -234,16 +237,19 @@ async function tick() {
       if (margin + pnl < maintenance) liquidations.push(id);
     }
   }
+  opens.sort((a, b) => (openRetry.get(a)?.at ?? 0) - (openRetry.get(b)?.at ?? 0));
   // the order matters when the RPC budget is tight: what protects the pool first
-  for (const id of liquidations) await send("liquidate", [id]);
-  for (const id of closes) await send("settle", [id]);
-  for (const id of opens) {
+  let roomMade = false;
+  for (const id of liquidations) if (await send("liquidate", [id])) roomMade = true;
+  for (const id of closes) if (await send("settle", [id])) roomMade = true;
+  if (roomMade) openRetry.clear();
+  for (const id of opens.slice(0, OPENS_PER_TICK)) {
     if (await send("settle", [id])) {
       openRetry.delete(id);
       continue;
     }
     const wait = Math.min((openRetry.get(id)?.wait ?? 0.5) * 2, 64);
-    openRetry.set(id, { at: tickNo + wait, wait });
+    openRetry.set(id, { at: tickNo + wait + randomInt(Math.ceil(wait / 2) + 1), wait });
     // a close may have left the entry bounds looser than the open positions need
     if (!v1 && tickNo - refreshedAt >= 100) {
       refreshedAt = tickNo;
