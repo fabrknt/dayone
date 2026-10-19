@@ -7,6 +7,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import poolArtifact from "../../out/LaunchPool.sol/LaunchPool.json";
 
 export const poolAbi = poolArtifact.abi;
+/// Pools deployed before the backing check return Params without stressMoveBps.
+export const legacyPoolAbi = poolAbi.map((e: any) => e.name !== "getParams" ? e
+  : { ...e, outputs: [{ ...e.outputs[0], components: e.outputs[0].components.filter((c: any) => c.name !== "stressMoveBps") }] });
 export const usdcAbi = [
   { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "allowance", stateMutability: "view", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }] },

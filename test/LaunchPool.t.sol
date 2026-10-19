@@ -73,7 +73,8 @@ contract LaunchPoolTest is Test {
             haircutFromMoveBps: 25,
             haircutToMoveBps: 100,
             rebateBps: 1200,
-            redeemBufferBps: 1000
+            redeemBufferBps: 1000,
+            stressMoveBps: 0 // the backing check has its own tests below
         });
     }
 
@@ -917,6 +918,100 @@ contract LaunchPoolTest is Test {
         assertLe(pool.shares(alice) + pool.shares(bob) + pool.shares(address(pool)), pool.totalShares());
         assertEq(pool.poolBalance(), balance + loss);
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance() + pool.pendingOpens()); // alice's open still pending
+    }
+
+    function _backedPool() internal returns (LaunchPool p) {
+        LaunchPool.Params memory params = defaultParams();
+        params.stressMoveBps = 1000;
+        p = new LaunchPool(
+            IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), params, 0, 1 days
+        );
+        for (uint256 i; i < 2; i++) {
+            vm.prank(i == 0 ? alice : bob);
+            usdc.approve(address(p), type(uint256).max);
+        }
+        usdc.mint(address(this), 100_000 * USDC);
+        usdc.approve(address(p), type(uint256).max);
+    }
+
+    function _requestAndWait(LaunchPool p, address u, bool long, uint256 margin, uint16 lev) internal returns (uint256 id) {
+        vm.prank(u);
+        id = p.requestOpen(long, margin, lev);
+        vm.warp(block.timestamp + 3);
+    }
+
+    /// An empty pool takes nothing; a seeded one takes positions while a 10% move either way
+    /// stays payable from its balance.
+    function test_backingLimitsOpensToTheBalance() public {
+        LaunchPool p = _backedPool();
+        uint256 id = _requestAndWait(p, alice, true, 1_000 * USDC, 20);
+        // $20K long: +10% owes $2,000 profit plus the side's $1,000 margin; the balance is the $10 fee
+        vm.expectPartialRevert(LaunchPool.BeyondBacking.selector);
+        p.settle(id);
+        vm.prank(alice);
+        p.cancelOpen(id);
+
+        p.seed(10_000 * USDC);
+        assertEq(p.shares(address(this)), 10_000 * USDC); // the first shares: 1 per base unit
+        id = _requestAndWait(p, alice, true, 1_000 * USDC, 20);
+        p.settle(id);
+        (uint256 up, uint256 down) = p.stressOwed(350e18);
+        assertApproxEqAbs(up, 3_000 * USDC, 1_000); // units and the stressed price round up
+        assertEq(down, 0); // longs lose on the way down
+        // another $60K long: +10% would owe $8,000 + $1,000 + $3,000 margin > $10,040
+        id = _requestAndWait(p, bob, true, 3_000 * USDC, 20);
+        vm.expectPartialRevert(LaunchPool.BeyondBacking.selector);
+        p.settle(id);
+        vm.prank(bob);
+        p.cancelOpen(id);
+        // a short of the same size adds its own side's bound only on the way down
+        id = _requestAndWait(p, bob, false, 1_000 * USDC, 20);
+        p.settle(id);
+        (up, down) = p.stressOwed(350e18);
+        assertApproxEqAbs(up, 3_000 * USDC, 1_000);
+        assertApproxEqAbs(down, 3_000 * USDC, 1_000);
+    }
+
+    /// While a winner is queued nothing new opens: requests are refused and a pending open
+    /// cannot settle. Seeding pays the queue first and reopens.
+    function test_queuedWinnerStopsOpensUntilPaid() public {
+        LaunchPool p = _backedPool();
+        p.seed(1_000 * USDC);
+        uint256 id = _requestAndWait(p, alice, true, 300 * USDC, 20); // $6K: +10% owes $600 + $300
+        p.settle(id);
+        uint256 pending = _requestAndWait(p, bob, true, 100 * USDC, 2);
+        // the price runs up 30% in steps the latch accepts; alice closes with more than the pool has
+        for (uint256 i = 1; i <= 15; i++) {
+            setPx(uint64(350_000 + 7_000 * i));
+            p.poke();
+        }
+        vm.prank(alice);
+        p.requestClose(id);
+        vm.warp(block.timestamp + 3);
+        p.settle(id);
+        assertGt(p.totalDebt(), 0);
+        vm.expectPartialRevert(LaunchPool.BeyondBacking.selector); // its fee pays a little of the queue first
+        p.settle(pending);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.BeyondBacking.selector, p.totalDebt(), 0));
+        p.requestOpen(true, 100 * USDC, 2);
+
+        uint256 owed = p.totalDebt();
+        uint256 sharesBefore = p.shares(address(this));
+        p.seed(owed + 1_000 * USDC);
+        assertEq(p.totalDebt(), 0);
+        assertEq(p.claimable(0), owed);
+        assertGt(p.shares(address(this)), sharesBefore);
+        p.settle(pending); // reopened
+    }
+
+    function test_seedIsOperatorOnly() public {
+        LaunchPool p = _backedPool();
+        vm.prank(alice);
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        p.seed(1_000 * USDC);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        p.seed(0);
     }
 
     function test_refusesOutOfTurnCalls() public {

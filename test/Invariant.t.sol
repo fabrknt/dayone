@@ -34,6 +34,10 @@ contract Handler is Test {
             0,
             1 days
         );
+        // starting capital: the backing check takes no positions on an empty pool
+        usdc.mint(address(this), 10_000_000 * USDC);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.seed(50_000 * USDC);
         for (uint256 i; i < actors.length; i++) {
             usdc.mint(actors[i], 100_000_000 * USDC);
             vm.prank(actors[i]);
@@ -170,6 +174,13 @@ contract Handler is Test {
         } catch {}
     }
 
+    /// More starting capital now and then, also while winners are queued.
+    function seed(uint256 amount) external {
+        if (amount % 8 != 0) return; // rare
+        pool.seed(bound(amount, 1, 20_000 * USDC));
+        calls["seed"]++;
+    }
+
     /// Paused about a quarter of the time, so opens still go through.
     function setHoursPaused(uint256 seed) external {
         pool.setHoursPaused(seed % 4 == 0);
@@ -218,7 +229,8 @@ contract LaunchPoolInvariantTest is Test {
             haircutFromMoveBps: 25,
             haircutToMoveBps: 100,
             rebateBps: 1200,
-            redeemBufferBps: 1000
+            redeemBufferBps: 1000,
+            stressMoveBps: 1000
         }));
         pool = h.pool();
         targetContract(address(h));
@@ -285,7 +297,7 @@ contract LaunchPoolInvariantTest is Test {
     }
 
     function invariant_sharesAddUp() public view {
-        uint256 sum = pool.shares(address(pool));
+        uint256 sum = pool.shares(address(pool)) + pool.shares(address(h));
         for (uint256 i; i < 3; i++) {
             sum += pool.shares(h.actors(i));
         }
@@ -304,8 +316,8 @@ contract LaunchPoolInvariantTest is Test {
 
     /// Shows how many of each action went through (forge test -vv).
     function afterInvariant() public {
-        string[10] memory names = [
-            "requestOpen", "cancelOpen", "requestClose", "settle", "liquidate", "poke", "rearm", "redeem", "changeParams", "claim"
+        string[11] memory names = [
+            "requestOpen", "cancelOpen", "requestClose", "settle", "liquidate", "poke", "rearm", "redeem", "changeParams", "claim", "seed"
         ];
         for (uint256 i; i < names.length; i++) {
             emit log_named_uint(names[i], h.calls(names[i]));

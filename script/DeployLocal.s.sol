@@ -33,7 +33,9 @@ contract DeployLocal is Script {
                 haircutFromMoveBps: 25,
                 haircutToMoveBps: 100,
                 rebateBps: 1200,
-                redeemBufferBps: 1000
+                redeemBufferBps: 1000,
+                // off by default: e2e.sh drives an empty pool into a queued winner on purpose
+                stressMoveBps: uint16(vm.envOr("STRESS_BPS", uint256(0)))
             }),
             0,
             60 // paramsDelay

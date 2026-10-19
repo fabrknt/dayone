@@ -10,8 +10,15 @@ Part of Fabrknt for HIP-3 (fabrknt.com/hip3/labs/day-one); it moves forward only
 The mechanism studied: a loss-funded counterparty pool for a newly listed HIP-3 perp, run by the
 market's deployer while the book is thin, and retired once it is deep enough.
 
-- **Loss-funded.** Starts empty; traders' losses and fees fill it. Profits the pool cannot pay yet
-  wait in a FIFO queue, paid from later losses (the Papertrade model). Paying the queue costs the
+- **Backed by the operator's seed, grown by losses.** The operator seeds the pool (`seed`, operator
+  only, for shares at the pre-seed `shareValuation()`); traders' losses and fees add to it. A new
+  position settles only if, after a `stressMoveBps` move either way (10% on testnet), the pool
+  could still pay every winner from its balance (`stressOwed`, the same conservative per-side
+  bound as `equity()`), and nothing opens while any winner is queued. So the future losers
+  paying today's winners is limited to moves past the stress size, and opens stop the moment it
+  happens. The bound counts each side's margin, so a seed backs about seed / (stress +
+  1 / leverage) of one-sided notional: $10,000 backs about $67,000 at 20x and $9,000 at 1x.
+  Profits the pool cannot pay yet wait in a FIFO queue, paid from later losses or a new seed. Paying the queue costs the
   same gas however long it is: income moves a cumulative counter, and `claim(id)` (anyone may
   call it; the keeper does) sends each winner what the queue has paid them.
 - **Rebates and haircut.** Losers get pool shares worth `rebateBps` of their loss (default 12%).
@@ -48,7 +55,7 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (20.0 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (21.2 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
@@ -114,4 +121,4 @@ Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 cl
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; a claim button in the
 web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (53 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
+`forge test` (56 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.

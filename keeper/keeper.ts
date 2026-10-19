@@ -40,7 +40,7 @@ const mcAbi = parseAbi([
   "function getCurrentBlockTimestamp() view returns (uint256)",
 ]);
 const TICK_MS = Number(process.env.TICK_MS ?? 1000);
-const abi = JSON.parse(readFileSync(new URL("../out/LaunchPool.sol/LaunchPool.json", import.meta.url), "utf8")).abi;
+let abi = JSON.parse(readFileSync(new URL("../out/LaunchPool.sol/LaunchPool.json", import.meta.url), "utf8")).abi;
 
 const rpc = process.env.RPC_URL ?? "http://127.0.0.1:8545";
 const pool = process.env.POOL as Address;
@@ -151,6 +151,9 @@ const v1 = process.env.POOL_ABI === "v1";
 if (process.env.POOL_ABI && !v1) throw new Error(`POOL_ABI must be v1 or unset, got ${process.env.POOL_ABI}`);
 const pauseFns = v1 ? { read: "opensPaused", set: "setOpensPaused" } : { read: "hoursPaused", set: "setHoursPaused" };
 const claims = !v1;
+// a v1 pool's Params has no stressMoveBps at the end
+if (v1) abi = abi.map((e: any) => e.name !== "getParams" ? e
+  : { ...e, outputs: [{ ...e.outputs[0], components: e.outputs[0].components.filter((c: any) => c.name !== "stressMoveBps") }] });
 function intEnv(name: string, dflt: number, max: number) {
   const v = Number(process.env[name] ?? dflt);
   if (!Number.isInteger(v) || v < 1 || v > max) throw new Error(`${name} must be an integer in [1, ${max}], got ${process.env[name]}`);

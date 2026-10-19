@@ -11,7 +11,8 @@ import {MockUSDC} from "../test/Mocks.sol";
 ///
 /// The testnet book sits far from its oracle (mid 612 bp above it on 10-17), so the mark/mid
 /// bounds are off here; the jump latch, two-step settlement and both caps stay on.
-/// A mock USDC is deployed as collateral; mint it with MockUSDC.mint.
+/// A mock USDC is deployed as collateral; mint it with MockUSDC.mint. The pool is seeded with
+/// SEED (default 10,000) mock USDC, which with stressMoveBps at 10% backs about $100K net.
 ///
 ///   forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm \
 ///     --broadcast --private-key $KEY
@@ -43,13 +44,19 @@ contract DeployTestnet is Script {
                 haircutFromMoveBps: 25,
                 haircutToMoveBps: 100,
                 rebateBps: 1200,
-                redeemBufferBps: 1000
+                redeemBufferBps: 1000,
+                stressMoveBps: 1000 // takes new positions only while a 10% move stays payable
             }),
             0,
             1 days // paramsDelay
         );
         address pauser = vm.envOr("PAUSER", address(0)); // the keeper's key: trading-hours pause only
         if (pauser != address(0)) pool.setPauser(pauser);
+        // the operator's starting capital (mock USDC here); nothing opens before it
+        uint256 seedAmount = vm.envOr("SEED", uint256(10_000)) * usdc;
+        token.mint(msg.sender, seedAmount);
+        token.approve(address(pool), seedAmount);
+        pool.seed(seedAmount);
         vm.stopBroadcast();
         console.log("usdc", address(token));
         console.log("pool", address(pool));

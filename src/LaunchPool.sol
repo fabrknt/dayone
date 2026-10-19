@@ -66,6 +66,10 @@ contract LaunchPool {
         uint16 haircutToMoveBps;
         uint16 rebateBps; // value of shares minted per unit of loss; must be below winHaircutMinBps
         uint16 redeemBufferBps; // of net OI, held back from redemption on top of minReserve
+        // A new position settles only if, after a move of this size either way, the pool could
+        // still pay every winner from its balance, and only while no winner is queued. 0 turns
+        // the check off (local tests); a deployed pool should not.
+        uint16 stressMoveBps;
     }
 
     struct Position {
@@ -149,6 +153,7 @@ contract LaunchPool {
     event Liquidated(uint256 indexed id, uint256 price, uint256 lost);
     event SharesMinted(address indexed to, uint256 lossAmount, uint256 shares, uint256 locked);
     event SharesRebased(uint64 epoch, uint256 totalShares);
+    event Seeded(uint256 amount, uint256 shares);
     event Redeemed(address indexed by, uint256 shares, uint256 amount);
     event ParamsProposed(uint64 effectiveAt);
     event ParamsApplied();
@@ -164,6 +169,7 @@ contract LaunchPool {
     error TooEarly();
     error NotLiquidatable();
     error NetExposureExceeded(uint256 net, uint256 limit);
+    error BeyondBacking(uint256 owed, uint256 balance);
     error RebateNotBelowHaircut();
     error RedeemBlocked(uint256 amount, uint256 available);
     error Breach(HLPriceGuard.Breach reason, uint256 observedBps, uint256 limitBps);
@@ -264,6 +270,35 @@ contract LaunchPool {
         graduated = true;
     }
 
+    /// The operator's starting capital. With the backing check on, a pool takes new positions
+    /// only as far as its balance covers a stressMoveBps move, so it takes none until seeded.
+    /// The money pays queued winners first. The operator gets shares for all of it at the
+    /// shareValuation() from before the seed, and redeems them under the same limits as any
+    /// holder. When the existing shares were worth nothing (winners were owed more than the pool
+    /// held), they are priced as worth one base unit, so the seed is not handed to them. Only the
+    /// operator: the pool does not take deposits from the public.
+    function seed(uint256 amount) external onlyOperator nonReentrant {
+        if (amount == 0) revert BadRequest();
+        uint256 old = shareValuation();
+        collateral.transferFrom(msg.sender, address(this), amount);
+        _income(amount);
+        uint256 s_;
+        uint256 locked;
+        if (totalShares == 0) {
+            s_ = amount; // 1 share = 1 collateral unit at the start
+            locked = old; // what the pool was already worth stays with nobody
+        } else {
+            uint256 base = old == 0 ? 1 : old;
+            s_ = amount * totalShares / base;
+            while (totalShares + s_ > MAX_SHARES) {
+                _rebase(); // amount < 2^60, so after one rebase s_ < 2^124
+                s_ = amount * totalShares / base;
+            }
+        }
+        _issue(msg.sender, s_, locked);
+        emit Seeded(amount, s_);
+    }
+
     /// New parameters, bounds and reference source, effective `paramsDelay` from now via
     /// applyParams(). Traders see them coming and can close first.
     function proposeParams(Params calldata p, HLPriceGuard.Bounds calldata b, IRefSource r) external onlyOperator {
@@ -307,6 +342,7 @@ contract LaunchPool {
     function requestOpen(bool long, uint256 margin, uint16 leverage) external nonReentrant returns (uint256 id) {
         Params storage P = _params;
         if (opensPaused() || graduated) revert OpensClosed();
+        if (P.stressMoveBps != 0 && totalDebt != 0) revert BeyondBacking(totalDebt, 0);
         if (margin == 0 || leverage == 0 || leverage > P.maxLeverage) revert BadRequest();
         uint256 notional = margin * leverage;
         if (notional < P.minNotional || notional > P.maxNotional) revert BadRequest();
@@ -369,6 +405,7 @@ contract LaunchPool {
             p.entry = price; // state before the token transfers in _income
             pendingOpens -= p.margin + p.openFee;
             _income(p.openFee);
+            _checkBacking(price);
             emit Opened(id, price);
         } else {
             _closeLane.spend(notional, _params.capPerWindow, _params.capWindow);
@@ -436,12 +473,35 @@ contract LaunchPool {
     /// (each loser can lose at most its margin before it is liquidated), so open losses are
     /// never counted as the pool's, and one side's losers never offset the other side's winners.
     function equity(uint256 price) public view returns (uint256) {
+        uint256 owed = owedAt(price);
+        return owed >= poolBalance ? 0 : poolBalance - owed;
+    }
+
+    /// The bound equity() subtracts: per side, the side's PnL at `price` plus the side's margin,
+    /// an upper bound on what its winners could be paid in profit (a loser loses at most its
+    /// margin, so losers never offset more than that).
+    function owedAt(uint256 price) public view returns (uint256) {
         uint256 longValue = _mulUp(longUnits, price); // what longs' units are worth, rounded up
         uint256 shortValue = shortUnits * price / 1e18; // rounded down: shorts gain when it is low
         uint256 longOwed = longValue + longMargin > longOI ? longValue + longMargin - longOI : 0;
         uint256 shortOwed = shortOI + shortMargin > shortValue ? shortOI + shortMargin - shortValue : 0;
-        uint256 owed = longOwed + shortOwed;
-        return owed >= poolBalance ? 0 : poolBalance - owed;
+        return longOwed + shortOwed;
+    }
+
+    /// What the pool would owe after a stressMoveBps move up and down from `price`. New
+    /// positions settle only while both stay within poolBalance.
+    function stressOwed(uint256 price) public view returns (uint256 up, uint256 down) {
+        uint256 s = _params.stressMoveBps;
+        up = owedAt(price * (10_000 + s) / 10_000 + 1); // rounded away from the price
+        down = owedAt(price * (10_000 - s) / 10_000);
+    }
+
+    function _checkBacking(uint256 price) internal view {
+        if (_params.stressMoveBps == 0) return;
+        if (totalDebt != 0) revert BeyondBacking(totalDebt, 0);
+        (uint256 up, uint256 down) = stressOwed(price);
+        uint256 worst = up > down ? up : down;
+        if (worst > poolBalance) revert BeyondBacking(worst, poolBalance);
     }
 
     /// The most the pool can be worth from what is open or requested now: balance, plus every
@@ -464,6 +524,7 @@ contract LaunchPool {
             revert BadParams();
         }
         if (p.redeemBufferBps < MIN_REDEEM_BUFFER_BPS) revert BadParams();
+        if (p.stressMoveBps >= 10_000) revert BadParams();
         if (p.minNotional == 0 || p.minNotional > p.maxNotional) revert BadParams();
         if (p.capWindow < ExposureBudget.SLICES || p.capWindow % ExposureBudget.SLICES != 0) revert BadParams();
         if (p.maxLeverage == 0 || p.winHaircutBps > 10_000 || p.feeBps > 1_000) revert BadParams();
@@ -612,6 +673,12 @@ contract LaunchPool {
         poolBalance += amount - pay;
     }
 
+    function _issue(address to, uint256 s_, uint256 locked) internal {
+        _shares[to] = _syncShares(to) + s_;
+        if (locked != 0) _shares[address(this)] = _syncShares(address(this)) + locked;
+        totalShares += s_ + locked;
+    }
+
     /// A holder's shares after the rebases since it was last touched; each rounds down.
     function shares(address a) public view returns (uint256) {
         uint256 behind = shareEpoch - _shareEpoch[a];
@@ -644,9 +711,9 @@ contract LaunchPool {
         if (value == 0) return;
         // the loss is already in poolBalance, so v >= loss > value unless winners are queued
         uint256 v = shareValuation();
-        if (v <= value) return; // everything is owed to queued winners: no rebate
         uint256 s_;
         uint256 locked;
+        if (v <= value) return; // everything is owed to queued winners: no rebate
         if (totalShares == 0) {
             s_ = value; // 1 share = 1 collateral unit at the start
             locked = v - value;
@@ -658,9 +725,7 @@ contract LaunchPool {
                 s_ = value * totalShares / (v - value);
             }
         }
-        _shares[to] = _syncShares(to) + s_;
-        if (locked != 0) _shares[address(this)] = _syncShares(address(this)) + locked;
-        totalShares += s_ + locked;
+        _issue(to, s_, locked);
         emit SharesMinted(to, loss, s_, locked);
     }
 }

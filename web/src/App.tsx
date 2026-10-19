@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { maxUint256, type Address, type PublicClient, type WalletClient } from "viem";
-import { loadConfig, makeClients, poolAbi, usdcAbi, readMarket, why, type Config, type Market } from "./chain";
+import { loadConfig, makeClients, poolAbi, legacyPoolAbi, usdcAbi, readMarket, why, type Config, type Market } from "./chain";
 
 const USDC = 1_000_000n;
 const ZERO: Address = "0x0000000000000000000000000000000000000000";
@@ -34,7 +34,7 @@ async function readPool(pub: PublicClient, pool: Address, oracle: bigint): Promi
   const r = (fn: string, args: unknown[] = []) => pub.readContract({ address: pool, abi: poolAbi, functionName: fn, args }) as Promise<any>;
   const [poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed, p, opensPaused, graduated, equity] = await Promise.all([
     r("poolBalance"), r("totalDebt"), r("totalShares"), r("longOI"), r("shortOI"), r("openLaneUsed"), r("closeLaneUsed"),
-    r("getParams"), r("opensPaused"), r("graduated"), r("equity", [oracle]),
+    r("getParams").catch(() => pub.readContract({ address: pool, abi: legacyPoolAbi, functionName: "getParams" })), r("opensPaused"), r("graduated"), r("equity", [oracle]),
   ]);
   return {
     poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed,
