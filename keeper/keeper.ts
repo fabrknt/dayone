@@ -309,7 +309,7 @@ async function sendClaims(): Promise<number> {
     let atUnpaid = false;
     let examined = 0n;
     for (const [k, i] of ids.entries()) {
-      const [, start, amount, done] = poolResult("debts", rows[k]) as [Address, bigint, bigint, bigint];
+      const [, , start, amount, done] = poolResult("debts", rows[k]) as [Address, bigint, bigint, bigint, bigint];
       examined++; // only what was looked at counts against the budget, so a wrap still has some
       if (start >= paid) {
         atUnpaid = true; // the queue is paid in order: nothing from here on is paid yet

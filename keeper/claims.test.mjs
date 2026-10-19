@@ -14,7 +14,7 @@ function makeKeeper(q, opts) {
     let CLAIM_SCAN = env.CLAIM_SCAN, CLAIMS_PER_TICK = env.CLAIMS_PER_TICK, claimFrom = 0n, scanAt = undefined;
     const poolCall = (f, a = []) => ({ f, a });
     const poolResult = (f, r) => r;
-    const batch = async (calls) => calls.map((c) => c.f === "debtCount" ? BigInt(q.debts.length) : c.f === "debtPaid" ? q.paid : (() => { const d = q.debts[Number(c.a[0])]; return [d.to, d.start, d.amount, d.done]; })());
+    const batch = async (calls) => calls.map((c) => c.f === "debtCount" ? BigInt(q.debts.length) : c.f === "debtPaid" ? q.paid : (() => { const d = q.debts[Number(c.a[0])]; return [d.to, 0n, d.start, d.amount, d.done]; })());
     const send = async (f, [i]) => { const d = q.debts[Number(i)]; if (d.blocked) return false; const up = q.paid - d.start < d.amount ? q.paid - d.start : d.amount; d.done = up; return true; };
     ${js}
     return sendClaims;`);

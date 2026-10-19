@@ -94,6 +94,7 @@ contract LaunchPool {
     /// total queued before it.
     struct Debt {
         address to;
+        uint64 at; // when it was queued, so pages can show how long the oldest has waited
         uint256 start;
         uint256 amount;
         uint256 claimed;
@@ -692,7 +693,7 @@ contract LaunchPool {
             poolBalance -= paid;
             queued = profit - paid;
             if (queued != 0) {
-                debts.push(Debt(p.owner, debtQueued, queued, 0));
+                debts.push(Debt(p.owner, uint64(block.timestamp), debtQueued, queued, 0));
                 debtQueued += queued;
                 totalDebt += queued;
             }

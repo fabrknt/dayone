@@ -253,7 +253,7 @@ contract LaunchPoolInvariantTest is Test {
         uint256 claimable;
         bool shortSeen;
         for (uint256 i; i < n; i++) {
-            (, uint256 start, uint256 amount, uint256 claimed) = pool.debts(i);
+            (,, uint256 start, uint256 amount, uint256 claimed) = pool.debts(i);
             owedOrUnclaimed += amount - claimed;
             claimable += pool.claimable(i);
             bool fullyPaid = pool.debtPaid() >= start + amount;

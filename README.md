@@ -89,8 +89,13 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   `deploy/cohost/` runs it as a systemd service on an existing Linux host.
 
 ## Web UI
-`web/`: trade, pool and positions in one page (Vite + React + viem).
-- Local: `./keeper/dev.sh` (anvil, mock precompiles, pool, keeper, a moving price), then
+`web/`: trade, pool and positions in one page (Vite + React + viem). The pool panel shows what
+is payable now (the balance), what is owed to queued winners and how long the oldest has waited
+(`Debt.at`), the room left for new longs and shorts under the backing check, and a notice when
+the queue has stopped new positions; your queued winnings are listed with a Receive button
+(`claim`), in case the keeper is not sending them.
+- Local: `./keeper/dev.sh` (anvil, mock precompiles, pool with the backing check at 10% and a
+  10,000 seed, `SEED=` to change it, keeper, a moving price), then
   `cd web && npm install && npm run dev`. anvil's key 0 is the operator and keeper, key 1 the
   page's dev wallet, key 2 moves the mock price (separate keys, so they never race on a nonce).
   `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.

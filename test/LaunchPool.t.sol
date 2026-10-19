@@ -128,6 +128,9 @@ contract LaunchPoolTest is Test {
         close(alice, id);
         assertEq(pool.totalDebt(), 757.5e6);
         assertEq(pool.poolBalance(), 0);
+        (address to, uint64 at,,,) = pool.debts(0);
+        assertEq(to, alice);
+        assertEq(at, block.timestamp); // when it was queued
 
         vm.warp(block.timestamp + 60);
         uint256 id2 = open(bob, true, 10_000 * USDC, 10); // bob's $50 open fee goes to alice first

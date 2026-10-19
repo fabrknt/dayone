@@ -26,9 +26,15 @@ px() {
   cast send -q --rpc-url $RPC --private-key $K2 0x000000000000000000000000000000000000080e "set(uint32,bytes)" 110001 $(cast abi-encode "f(uint64,uint64)" $(($1 - 15)) $(($1 + 15)))
 }
 px 350000
-forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
+# the backing check on (10%), and the operator's starting capital: SEED=2000 ./keeper/dev.sh for a small pool
+STRESS_BPS=${STRESS_BPS:-1000} forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
 USDC=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['usdc'])")
 POOL=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['pool'])")
+SEED=$(( ${SEED:-10000} * 1000000 ))
+OP=$(cast wallet address $K0)
+cast send -q --rpc-url $RPC --private-key $K0 $USDC "mint(address,uint256)" $OP $SEED
+cast send -q --rpc-url $RPC --private-key $K0 $USDC "approve(address,uint256)" $POOL $SEED
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "seed(uint256)" $SEED
 mkdir -p web/public
 cat > web/public/local.json <<JSON
 {"rpc":"$RPC","chainId":31337,"pool":"$POOL","usdc":"$USDC","market":"xyz:TSLA (local mock)","devKey":"$K1"}

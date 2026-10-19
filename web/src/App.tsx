@@ -13,8 +13,12 @@ type PoolState = {
   openUsed: bigint; closeUsed: bigint; capPerWindow: bigint; capWindow: bigint; maxNet: bigint;
   maxLeverage: number; maxNotional: bigint; feeBps: number; settleDelay: bigint; winHaircutBps: number; winHaircutMinBps: number; haircutFromMoveBps: number; haircutToMoveBps: number; rebateBps: number;
   opensPaused: boolean; graduated: boolean; equity: bigint;
+  backing: Backing | null; // null for a pool from before the backing check
 };
-type Me = { address: Address; usdc: bigint; allowance: bigint; shares: bigint; positions: Pos[] };
+// What the backing check allows now, and how long the queue has waited.
+type Backing = { stressBps: number; up: bigint; down: bigint; roomLong: bigint; roomShort: bigint; oldestAt: bigint | null };
+type Claim = { id: bigint; claimable: bigint; waiting: bigint };
+type Me = { address: Address; usdc: bigint; allowance: bigint; shares: bigint; positions: Pos[]; claims: Claim[] };
 
 const usd = (v: bigint, dp = 2) => {
   const n = Number(v) / 1e6;
@@ -36,13 +40,59 @@ async function readPool(pub: PublicClient, pool: Address, oracle: bigint): Promi
     r("poolBalance"), r("totalDebt"), r("totalShares"), r("longOI"), r("shortOI"), r("openLaneUsed"), r("closeLaneUsed"),
     r("getParams").catch(() => pub.readContract({ address: pool, abi: legacyPoolAbi, functionName: "getParams" })), r("opensPaused"), r("graduated"), r("equity", [oracle]),
   ]);
+  const backing = p.stressMoveBps ? await readBacking(r, oracle, Number(p.stressMoveBps), poolBalance, totalDebt) : null;
   return {
+    backing,
     poolBalance, totalDebt, totalShares, longOI, shortOI, openUsed, closeUsed,
     maxLeverage: p.maxLeverage, feeBps: p.feeBps, settleDelay: p.settleDelay, capWindow: p.capWindow,
     capPerWindow: p.capPerWindow, maxNotional: p.maxNotional, maxNet: p.maxNetNotional,
     winHaircutBps: p.winHaircutBps, winHaircutMinBps: p.winHaircutMinBps, haircutFromMoveBps: p.haircutFromMoveBps, haircutToMoveBps: p.haircutToMoveBps, rebateBps: p.rebateBps,
     opensPaused, graduated, equity,
   };
+}
+
+/// How much more each side can open before a stressBps move would owe more than the balance
+/// (the pool's profitBound: every long counted from the lowest long entry, every short from the
+/// highest short entry), and when the oldest unpaid winner was queued.
+async function readBacking(r: (fn: string, args?: unknown[]) => Promise<any>, oracle: bigint, stressBps: number, balance: bigint, totalDebt: bigint): Promise<Backing> {
+  const [[up, down], longMin, shortMax, longCount, shortCount]: [[bigint, bigint], bigint, bigint, bigint, bigint] = await Promise.all([
+    r("stressOwed", [oracle]), r("longEntryMin"), r("shortEntryMax"), r("longCount"), r("shortCount"),
+  ]);
+  const s = BigInt(stressBps);
+  const pu = (oracle * (10_000n + s)) / 10_000n;
+  const pd = (oracle * (10_000n - s)) / 10_000n;
+  const longRef = longCount > 0n && longMin < oracle ? longMin : oracle; // a new long counts from here
+  const shortRef = shortCount > 0n && shortMax > oracle ? shortMax : oracle;
+  const room = (owed: bigint, per: bigint) => (totalDebt > 0n || owed >= balance || per <= 0n ? 0n : ((balance - owed) * oracle) / per);
+  let oldestAt: bigint | null = null;
+  if (totalDebt > 0n) {
+    // the queue is paid in order: the oldest unpaid entry is the first whose end is past debtPaid
+    const [count, paid] = await Promise.all([r("debtCount"), r("debtPaid")]) as [bigint, bigint];
+    let lo = 0n, hi: bigint = count - 1n;
+    while (lo < hi) {
+      const mid = (lo + hi) / 2n;
+      const [, , start, amount] = await r("debts", [mid]);
+      if (start + amount > paid) hi = mid; else lo = mid + 1n;
+    }
+    oldestAt = (await r("debts", [lo]))[1];
+  }
+  return { stressBps, up, down, roomLong: room(up, pu - longRef), roomShort: room(down, shortRef - pd), oldestAt };
+}
+
+/// The caller's queued winnings, newest 200 entries.
+async function readClaims(r: (fn: string, args?: unknown[]) => Promise<any>, address: Address): Promise<Claim[]> {
+  let count: bigint;
+  try { count = await r("debtCount"); } catch { return []; } // a pool from before claim()
+  const from = count > 200n ? count - 200n : 0n;
+  const ids: bigint[] = [];
+  for (let i = from; i < count; i++) ids.push(i);
+  const rows = await Promise.all(ids.map((i) => r("debts", [i])));
+  const mine = ids.filter((_, k) => (rows[k][0] as string).toLowerCase() === address.toLowerCase() && rows[k][3] > rows[k][4]);
+  const claimable = await Promise.all(mine.map((i) => r("claimable", [i]))) as bigint[];
+  return mine.map((id, k) => {
+    const row = rows[ids.indexOf(id)];
+    return { id, claimable: claimable[k], waiting: (row[3] as bigint) - (row[4] as bigint) - claimable[k] };
+  });
 }
 
 async function readMe(pub: PublicClient, c: Config, address: Address): Promise<Me> {
@@ -57,7 +107,7 @@ async function readMe(pub: PublicClient, c: Config, address: Address): Promise<M
   const positions = raw
     .map((p: any, i) => ({ id: ids[i], owner: p[0] as Address, long: p[1], leverage: Number(p[2]), margin: p[3], entry: p[4], requestedAt: p[5], closing: p[6] }))
     .filter((p) => p.owner.toLowerCase() === address.toLowerCase());
-  return { address, usdc: usdc as bigint, allowance: allowance as bigint, shares, positions };
+  return { address, usdc: usdc as bigint, allowance: allowance as bigint, shares, positions, claims: await readClaims(r, address) };
 }
 
 export default function App() {
@@ -136,7 +186,8 @@ export default function App() {
   const net = pool ? (pool.longOI > pool.shortOI ? pool.longOI - pool.shortOI : pool.shortOI - pool.longOI) : 0n;
   const sharePrice = pool && pool.totalShares > 0n ? (pool.equity * 10n ** 18n) / pool.totalShares : 0n;
   const myShareValue = me && pool && pool.totalShares > 0n ? (me.shares * pool.equity) / pool.totalShares : 0n;
-  const status = !market ? null : market.guard ? "paused" : pool?.graduated ? "graduated" : pool?.opensPaused ? "closed" : "live";
+  const status = !market ? null : market.guard ? "paused" : pool?.graduated ? "graduated" : pool?.opensPaused ? "closed"
+    : pool?.backing && pool.totalDebt > 0n ? "queued" : "live";
 
   return (
     <div className="shell">
@@ -159,6 +210,7 @@ export default function App() {
           {status === "live" && "Live"}
           {status === "paused" && "Price check failed: waiting"}
           {status === "closed" && "New positions paused"}
+          {status === "queued" && "New positions stopped: winners waiting to be paid"}
           {status === "graduated" && "Graduated: closes only"}
         </div>
         {market?.guard && <div className="guard">{market.guard}</div>}
@@ -204,11 +256,13 @@ export default function App() {
         <section className="card">
           <h2>Pool</h2>
           <div className="facts">
-            <span>Balance</span><span className="mono">{pool ? usd(pool.poolBalance) : "—"}</span>
+            <span>Payable now</span><span className="mono">{pool ? usd(pool.poolBalance) : "—"}</span>
             <span>Owed to winners (queue)</span><span className="mono">{pool ? usd(pool.totalDebt) : "—"}</span>
+            {pool?.backing?.oldestAt && <><span>Oldest waiting</span><span className="mono">{since(pool.backing.oldestAt)}</span></>}
             <span>Equity after open profits</span><span className="mono">{pool ? usd(pool.equity) : "—"}</span>
             <span>Long / short open</span><span className="mono">{pool ? `${usd(pool.longOI, 0)} / ${usd(pool.shortOI, 0)}` : "—"}</span>
           </div>
+          {pool?.backing && <BackingView b={pool.backing} queued={pool.totalDebt > 0n} />}
           <Meter label="Net exposure" used={net} cap={pool?.maxNet ?? 0n} />
           <Meter label="Opens, last minute" used={pool?.openUsed ?? 0n} cap={pool?.capPerWindow ?? 0n} />
           <Meter label="Closes, last minute" used={pool?.closeUsed ?? 0n} cap={pool?.capPerWindow ?? 0n} />
@@ -224,6 +278,26 @@ export default function App() {
           {pool && pool.totalShares > 0n && <p className="fine">Share value: {(Number(sharePrice) / 1e18).toFixed(4)} USDC per share unit.</p>}
         </section>
       </div>
+
+      {me && me.claims.length > 0 && (
+        <section className="card">
+          <h2>Your queued winnings</h2>
+          <p className="fine">Profit the pool could not pay when you closed. Later losses and the operator's capital pay the queue in order; what has been paid is yours to receive (the keeper usually sends it for you).</p>
+          <table>
+            <thead><tr><th className="wide-only">#</th><th>Ready</th><th>Still waiting</th><th></th></tr></thead>
+            <tbody>
+              {me.claims.map((c) => (
+                <tr key={String(c.id)}>
+                  <td className="mono wide-only">{String(c.id)}</td>
+                  <td className="mono up">{usd(c.claimable)}</td>
+                  <td className="mono">{usd(c.waiting)}</td>
+                  <td>{c.claimable > 0n && <button className="ghost small" disabled={!!busy} onClick={() => tx("Receiving", cfg.pool, poolAbi, "claim", [c.id])}>Receive</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       {me && me.positions.length > 0 && (
         <section className="card">
@@ -260,7 +334,8 @@ export default function App() {
           <li><b>New listings have thin books.</b> Day One takes the other side of your trade while the HL book fills up, and steps back once it is deep enough.</li>
           <li><b>Fills at the oracle, two steps.</b> You request, and it fills at the next price once {String(pool?.settleDelay ?? 3n)} s have passed, so nobody can trade on a price they already know.</li>
           <li><b>It stops rather than fill at a bad price.</b> If the oracle jumps, disagrees with HL's book or with an outside price, every fill and liquidation waits.</li>
-          <li><b>Losses fund the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of what they lost; winners give the pool {pool ? pool.winHaircutBps / 100 : 30}% of profit on small moves, falling to {pool ? pool.winHaircutMinBps / 100 : 15}% on moves of {pool ? pool.haircutToMoveBps / 100 : 1}% or more. Profit the pool can't pay yet is queued and paid from later losses.</li>
+          <li><b>It only takes what it can pay.</b> The operator puts in starting capital. A new position is accepted only if, after a {pool?.backing ? pool.backing.stressBps / 100 : 10}% move either way, the pool could still pay every winner from its balance, and nothing new opens while any winner is waiting to be paid.</li>
+          <li><b>Losses add to the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of what they lost; winners give the pool {pool ? pool.winHaircutBps / 100 : 30}% of profit on small moves, falling to {pool ? pool.winHaircutMinBps / 100 : 15}% on moves of {pool ? pool.haircutToMoveBps / 100 : 1}% or more. Profit the pool can't pay yet is queued and paid from later losses.</li>
         </ol>
       </section>
 
@@ -268,6 +343,30 @@ export default function App() {
         Prices are Hyperliquid's oracle for this HIP-3 market, read on HyperEVM and checked against the book, an independent
         reference and the last accepted price. Test deployment: test USDC only.
       </footer>
+    </div>
+  );
+}
+
+function since(at: bigint): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - Number(at));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+
+function BackingView({ b, queued }: { b: Backing; queued: boolean }) {
+  return (
+    <div className="backing">
+      {queued ? (
+        <div className="note">New positions are stopped until the winners in the queue are paid.</div>
+      ) : (
+        <div className="facts">
+          <span>Room for new longs</span><span className="mono">about {usd(b.roomLong, 0)}</span>
+          <span>Room for new shorts</span><span className="mono">about {usd(b.roomShort, 0)}</span>
+        </div>
+      )}
+      <p className="fine">
+        Owed after a {b.stressBps / 100}% move: {usd(b.up, 0)} up, {usd(b.down, 0)} down. New positions are accepted only while both stay within the balance.
+      </p>
     </div>
   );
 }
