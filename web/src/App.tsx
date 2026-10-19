@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { maxUint256, type Address, type PublicClient, type WalletClient } from "viem";
+import { backingRoom } from "./room";
 import { loadConfig, makeClients, poolAbi, legacyPoolAbi, usdcAbi, readMarket, why, type Config, type Market } from "./chain";
 
 const USDC = 1_000_000n;
@@ -55,19 +56,18 @@ async function readPool(pub: PublicClient, pool: Address, oracle: bigint): Promi
 /// (the pool's profitBound: every long counted from the lowest long entry, every short from the
 /// highest short entry), and when the oldest unpaid winner was queued.
 async function readBacking(r: (fn: string, args?: unknown[]) => Promise<any>, oracle: bigint, stressBps: number, balance: bigint, totalDebt: bigint): Promise<Backing> {
-  const [[up, down], longMin, shortMax, longCount, shortCount]: [[bigint, bigint], bigint, bigint, bigint, bigint] = await Promise.all([
-    r("stressOwed", [oracle]), r("longEntryMin"), r("shortEntryMax"), r("longCount"), r("shortCount"),
+  const [[up, down], longMin, shortMax, longCount, shortCount, longUnits, shortUnits, count, paid]: bigint[][] & any = await Promise.all([
+    r("stressOwed", [oracle]), r("longEntryMin"), r("shortEntryMax"), r("longCount"), r("shortCount"), r("longUnits"), r("shortUnits"),
+    r("debtCount"), r("debtPaid"),
   ]);
   const s = BigInt(stressBps);
-  const pu = (oracle * (10_000n + s)) / 10_000n;
-  const pd = (oracle * (10_000n - s)) / 10_000n;
-  const longRef = longCount > 0n && longMin < oracle ? longMin : oracle; // a new long counts from here
-  const shortRef = shortCount > 0n && shortMax > oracle ? shortMax : oracle;
-  const room = (owed: bigint, per: bigint) => (totalDebt > 0n || owed >= balance || per <= 0n ? 0n : ((balance - owed) * oracle) / per);
+  const stressed = [(oracle * (10_000n + s)) / 10_000n + 1n, (oracle * (10_000n - s)) / 10_000n];
+  const st = { oracle, balance, totalDebt, stressed, longMin, shortMax, longCount, shortCount, longUnits, shortUnits };
   let oldestAt: bigint | null = null;
-  if (totalDebt > 0n) {
+  const key = `${count}:${paid}`;
+  if (totalDebt > 0n && oldestCache.key === key) oldestAt = oldestCache.at;
+  else if (totalDebt > 0n) {
     // the queue is paid in order: the oldest unpaid entry is the first whose end is past debtPaid
-    const [count, paid] = await Promise.all([r("debtCount"), r("debtPaid")]) as [bigint, bigint];
     let lo = 0n, hi: bigint = count - 1n;
     while (lo < hi) {
       const mid = (lo + hi) / 2n;
@@ -75,24 +75,34 @@ async function readBacking(r: (fn: string, args?: unknown[]) => Promise<any>, or
       if (start + amount > paid) hi = mid; else lo = mid + 1n;
     }
     oldestAt = (await r("debts", [lo]))[1];
+    oldestCache = { key, at: oldestAt };
   }
-  return { stressBps, up, down, roomLong: room(up, pu - longRef), roomShort: room(down, shortRef - pd), oldestAt };
+  return { stressBps, up, down, roomLong: backingRoom(st, true), roomShort: backingRoom(st, false), oldestAt };
 }
+// the oldest unpaid entry only changes when the queue grows or is paid
+let oldestCache: { key: string; at: bigint | null } = { key: "", at: null };
 
-/// The caller's queued winnings, newest 200 entries.
+/// The caller's queued winnings among the newest CLAIM_WINDOW queue entries. Re-read only when
+/// the queue grows, is paid or something is claimed.
+const CLAIM_WINDOW = 200n;
+let claimsCache: { key: string; claims: Claim[] } = { key: "", claims: [] };
 async function readClaims(r: (fn: string, args?: unknown[]) => Promise<any>, address: Address): Promise<Claim[]> {
-  let count: bigint;
-  try { count = await r("debtCount"); } catch { return []; } // a pool from before claim()
-  const from = count > 200n ? count - 200n : 0n;
+  let count: bigint, paid: bigint, unclaimed: bigint;
+  try { [count, paid, unclaimed] = await Promise.all([r("debtCount"), r("debtPaid"), r("unclaimed")]); } catch { return []; } // a pool from before claim()
+  const key = `${address}:${count}:${paid}:${unclaimed}`;
+  if (claimsCache.key === key) return claimsCache.claims;
+  const from = count > CLAIM_WINDOW ? count - CLAIM_WINDOW : 0n;
   const ids: bigint[] = [];
   for (let i = from; i < count; i++) ids.push(i);
   const rows = await Promise.all(ids.map((i) => r("debts", [i])));
   const mine = ids.filter((_, k) => (rows[k][0] as string).toLowerCase() === address.toLowerCase() && rows[k][3] > rows[k][4]);
   const claimable = await Promise.all(mine.map((i) => r("claimable", [i]))) as bigint[];
-  return mine.map((id, k) => {
+  const claims = mine.map((id, k) => {
     const row = rows[ids.indexOf(id)];
     return { id, claimable: claimable[k], waiting: (row[3] as bigint) - (row[4] as bigint) - claimable[k] };
   });
+  claimsCache = { key, claims };
+  return claims;
 }
 
 async function readMe(pub: PublicClient, c: Config, address: Address): Promise<Me> {
@@ -282,7 +292,7 @@ export default function App() {
       {me && me.claims.length > 0 && (
         <section className="card">
           <h2>Your queued winnings</h2>
-          <p className="fine">Profit the pool could not pay when you closed. Later losses and the operator's capital pay the queue in order; what has been paid is yours to receive (the keeper usually sends it for you).</p>
+          <p className="fine">Profit the pool could not pay when you closed, among the newest {String(CLAIM_WINDOW)} queue entries (an older one can be received with claim(id) directly). Later losses and the operator's capital pay the queue in order; what has been paid is yours to receive (the keeper usually sends it for you).</p>
           <table>
             <thead><tr><th className="wide-only">#</th><th>Ready</th><th>Still waiting</th><th></th></tr></thead>
             <tbody>
@@ -334,7 +344,11 @@ export default function App() {
           <li><b>New listings have thin books.</b> Day One takes the other side of your trade while the HL book fills up, and steps back once it is deep enough.</li>
           <li><b>Fills at the oracle, two steps.</b> You request, and it fills at the next price once {String(pool?.settleDelay ?? 3n)} s have passed, so nobody can trade on a price they already know.</li>
           <li><b>It stops rather than fill at a bad price.</b> If the oracle jumps, disagrees with HL's book or with an outside price, every fill and liquidation waits.</li>
-          <li><b>It only takes what it can pay.</b> The operator puts in starting capital. A new position is accepted only if, after a {pool?.backing ? pool.backing.stressBps / 100 : 10}% move either way, the pool could still pay every winner from its balance, and nothing new opens while any winner is waiting to be paid.</li>
+          {pool?.backing ? (
+            <li><b>It only takes what it can pay.</b> The operator puts in starting capital. A new position is accepted only if, after a {pool.backing.stressBps / 100}% move either way, the pool could still pay every winner from its balance, and nothing new opens while any winner is waiting to be paid. Moves larger than that can still leave winners waiting.</li>
+          ) : (
+            <li><b>This pool has no backing check.</b> It was deployed before that check existed: new positions are limited only by the caps below, not by what the pool can pay.</li>
+          )}
           <li><b>Losses add to the pool.</b> Losers get pool shares worth {pool ? pool.rebateBps / 100 : 12}% of what they lost; winners give the pool {pool ? pool.winHaircutBps / 100 : 30}% of profit on small moves, falling to {pool ? pool.winHaircutMinBps / 100 : 15}% on moves of {pool ? pool.haircutToMoveBps / 100 : 1}% or more. Profit the pool can't pay yet is queued and paid from later losses.</li>
         </ol>
       </section>
@@ -360,12 +374,12 @@ function BackingView({ b, queued }: { b: Backing; queued: boolean }) {
         <div className="note">New positions are stopped until the winners in the queue are paid.</div>
       ) : (
         <div className="facts">
-          <span>Room for new longs</span><span className="mono">about {usd(b.roomLong, 0)}</span>
-          <span>Room for new shorts</span><span className="mono">about {usd(b.roomShort, 0)}</span>
+          <span>Backing room, new longs</span><span className="mono">about {usd(b.roomLong, 0)}</span>
+          <span>Backing room, new shorts</span><span className="mono">about {usd(b.roomShort, 0)}</span>
         </div>
       )}
       <p className="fine">
-        Owed after a {b.stressBps / 100}% move: {usd(b.up, 0)} up, {usd(b.down, 0)} down. New positions are accepted only while both stay within the balance.
+        Owed after a {b.stressBps / 100}% move: {usd(b.up, 0)} up, {usd(b.down, 0)} down. New positions are accepted only while both stay within the balance. The room is for one new position at today's price; the caps below and the price at settlement also apply.
       </p>
     </div>
   );

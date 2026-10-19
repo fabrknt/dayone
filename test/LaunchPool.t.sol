@@ -1006,6 +1006,30 @@ contract LaunchPoolTest is Test {
         assertEq(p.longEntryMin(), 455e18);
     }
 
+    /// Codex round 12: a new long at a new low entry re-prices the old longs. The page's room
+    /// (web/room.ts, checked in web/room.test.mjs on this state) says about $23,576.
+    function test_r12_roomMatchesBacking() public {
+        LaunchPool p = _backedPool();
+        p.seed(10_000 * USDC);
+        for (uint256 i = 1; i <= 15; i++) {
+            setPx(uint64(350_000 + 7_000 * i));
+            p.poke();
+        }
+        p.settle(_requestAndWait(p, alice, true, 10_000 * USDC, 10)); // $100K at $455
+        for (uint256 i = 1; i <= 15; i++) {
+            setPx(uint64(455_000 - 7_000 * i));
+            p.poke();
+        }
+        assertEq(p.poolBalance(), 10_050 * USDC);
+        assertEq(p.longUnits(), 219_780_220);
+        uint256 snap = vm.snapshotState();
+        p.settle(_requestAndWait(p, bob, true, 2_357 * USDC, 10)); // $23,570 settles
+        vm.revertToState(snap);
+        uint256 id = _requestAndWait(p, bob, true, 2_380 * USDC, 10); // $23,800 does not
+        vm.expectPartialRevert(LaunchPool.BeyondBacking.selector);
+        p.settle(id);
+    }
+
     /// Off only on a local chain; elsewhere at least MIN_STRESS_BPS, at deploy and on proposal.
     function test_stressFloorOutsideLocalChains() public {
         LaunchPool p = _backedPool();
