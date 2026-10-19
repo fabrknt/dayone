@@ -39,8 +39,9 @@ contract LaunchPool {
     /// HL perp prices have `6 - szDecimals` decimals, so szDecimals is at most 6. Larger values
     /// would scale prices far enough to overflow the PnL and equity products.
     uint8 public constant MAX_SZ_DECIMALS = 6;
-    /// A rebate that would push the share count past this is skipped, so a share price driven
-    /// toward zero can never overflow the count and block a close or liquidation.
+    /// A rebate that would push the share count past this is paid as a claim on the pool
+    /// instead (see _credit), so a share price driven toward zero can never overflow the count
+    /// and block a close or liquidation, and holders never keep the rebate.
     uint256 public constant MAX_SHARES = 2 ** 128;
 
     struct Params {
@@ -144,6 +145,7 @@ contract LaunchPool {
     event Closed(uint256 indexed id, uint256 exit, int256 pnl, uint256 paid, uint256 queued);
     event Liquidated(uint256 indexed id, uint256 price, uint256 lost);
     event SharesMinted(address indexed to, uint256 lossAmount, uint256 shares, uint256 locked);
+    event RebateCredited(address indexed to, uint256 debtId, uint256 amount);
     event Redeemed(address indexed by, uint256 shares, uint256 amount);
     event ParamsProposed(uint64 effectiveAt);
     event ParamsApplied();
@@ -607,6 +609,19 @@ contract LaunchPool {
         poolBalance += amount - pay;
     }
 
+    /// A rebate the share count cannot hold, owed like a winner's profit: paid now from the
+    /// balance when nobody is waiting (claim(id) sends it), otherwise queued behind them.
+    function _credit(address to, uint256 amount) internal {
+        uint256 paid = amount < poolBalance ? amount : poolBalance; // poolBalance is 0 while anyone waits
+        emit RebateCredited(to, debts.length, amount);
+        debts.push(Debt(to, debtQueued, amount, 0));
+        debtQueued += amount;
+        debtPaid += paid;
+        totalDebt += amount - paid;
+        poolBalance -= paid;
+        unclaimed += paid;
+    }
+
     /// Shares worth `rebateBps` (the position's own, fixed at request) of the loss, priced at
     /// shareValuation().
     ///
@@ -626,7 +641,7 @@ contract LaunchPool {
         } else {
             s_ = value * totalShares / (v - value);
         }
-        if (totalShares + s_ + locked > MAX_SHARES) return; // the rebate is skipped, the loss still settles
+        if (totalShares + s_ + locked > MAX_SHARES) return _credit(to, value);
         shares[to] += s_;
         if (locked != 0) shares[address(this)] += locked;
         totalShares += s_ + locked;

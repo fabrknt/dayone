@@ -215,10 +215,12 @@ async function tick() {
     }
     if (entry !== 0n) {
       const notional = margin * BigInt(leverage);
-      // as the pool rounds: PnL toward minus infinity, the maintenance level up
+      // as the pool rounds: PnL toward minus infinity and the maintenance level up; a v1 pool
+      // truncates both, so a boundary position is not simulated on every tick for nothing
       const x = (long ? oracle - entry : entry - oracle) * notional;
-      const pnl = x / entry - (x < 0n && x % entry !== 0n ? 1n : 0n);
-      if (margin + pnl < (notional * BigInt(maintenanceBps) + 9999n) / 10000n) liquidations.push(id);
+      const pnl = x / entry - (!v1 && x < 0n && x % entry !== 0n ? 1n : 0n);
+      const maintenance = (notional * BigInt(maintenanceBps) + (v1 ? 0n : 9999n)) / 10000n;
+      if (margin + pnl < maintenance) liquidations.push(id);
     }
   }
   // the order matters when the RPC budget is tight: what protects the pool first

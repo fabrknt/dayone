@@ -904,9 +904,22 @@ contract LaunchPoolTest is Test {
         setPx(344_750);
         pool.poke();
         setPx(340_000);
-        close(bob, id); // a $285 loss: the rebate would overflow MAX_SHARES
+        uint256 balance = pool.poolBalance();
+        uint256 n = pool.debtCount();
+        uint256 bobBefore = usdc.balanceOf(bob);
+        close(bob, id); // a loss from 349 to 340: the rebate would overflow MAX_SHARES
+        uint256 loss = 1_000 * USDC - (usdc.balanceOf(bob) - bobBefore); // includes the $5 close fee
         assertEq(pool.shares(bob), 0);
         assertEq(pool.totalShares(), total);
+        // paid as a claim instead, so the holders do not keep it
+        (address to,, uint256 amount,) = pool.debts(n);
+        assertEq(to, bob);
+        assertEq(amount, (loss - 5 * USDC) * 1200 / 10_000);
+        assertEq(pool.claimable(n), amount);
+        assertEq(pool.poolBalance(), balance + loss - amount);
+        pool.claim(n);
+        assertEq(usdc.balanceOf(bob), bobBefore + 1_000 * USDC - loss + amount);
+        assertEq(usdc.balanceOf(address(pool)), pool.poolBalance() + pool.pendingOpens()); // alice's open still pending
     }
 
     function test_refusesOutOfTurnCalls() public {
