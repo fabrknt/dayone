@@ -8,6 +8,10 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   testnet (operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9`), in `the operator key file`
   (mode 600, with the `0x` prefix). Its HyperCore account was created by sending 0.05 HYPE from the
   EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be turned on after.
+- This pool predates the backing check, `seed`, the pauser role and `claim()` (keeper
+  `POOL_ABI=v1`; the page says it has no backing check). Redeploying the current contract waits on
+  a decision about a new key funded with no link to the founder (the operator above was funded
+  from the founder's earlier deployer address).
 - Earlier pools, abandoned (test positions closed, about $0.20 of mock-USDC fees left in each):
   `0x7103…d6D6` (curve, previous key) and `0x372E…9040` (flat haircut).
 - First run: `poke` with the real precompiles, then a $200 long requested and settled by the
@@ -64,9 +68,9 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
 
 ## Steps (the key holder runs 1, 2 and 3)
 1. A fresh key with testnet HYPE on HyperEVM for gas (send from HyperCore testnet spot to the
-   EVM, or a faucet). About 6.4M gas in all at 0.2 gwei.
-2. Turn on big blocks for that address. LaunchPool's initcode is 18.5 KB with the optimizer (about
-   3.7M gas), over the 2M small-block limit. This is a HyperCore action signed by the same key:
+   EVM, or a faucet). About 5.1M gas in all (forge's estimate for `DeployTestnet`, 10-20) at 0.2 gwei.
+2. Turn on big blocks for that address. LaunchPool's initcode is 24.6 KB with the optimizer (22.0 KB
+   runtime), over the 2M small-block limit. This is a HyperCore action signed by the same key:
    `{"type": "evmUserModify", "usingBigBlocks": true}` (hyperliquid-python-sdk:
    `Exchange.use_big_blocks(True)`; or `script/big_blocks.py on`, which skips the SDK's metadata
    load because the SDK fails to parse testnet's spot list). Turn it off after deploying
@@ -74,7 +78,9 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
    block, about one a minute.
 3. `forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm --broadcast --private-key $KEY`
    It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
-   position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K.
+   position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K,
+   `stressMoveBps` 10%, and a seed of `SEED` mock USDC (default 10,000, minted to the deployer and
+   paid in for shares), which backs about $100K of one-sided notional.
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
    run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.

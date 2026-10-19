@@ -59,24 +59,27 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (21.9 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (22.0 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 When to retire the pool (graduation criteria, a deadline, stop conditions, what stays
 undecided with the operator): `docs/graduation.md` (Japanese, a draft until an operator signs on).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (46 tests, including regressions for review
-  findings: `test_r1_*` to `test_r7_*`), `test/Invariant.t.sol` (random sequences of every action,
-  parameter changes, latch trips and rearms; after each step: tokens == books, the debt queue's
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (54 tests, including regressions for review
+  findings: `test_r1_*` to `test_r12_*`), `test/Invariant.t.sol` (5 invariants over random sequences
+  of every action, parameter changes, latch trips, rearms and seeds; after each step: tokens == books, the debt queue's
   counters and order, per-side totals == positions, shares add up, equity <= shareValuation).
-  `forge coverage`: lines 100%, branches 96%.
+  `forge coverage --ir-minimum` on `LaunchPool.sol` (10-20): lines 98.9%, branches 91.8%.
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
-- `keeper/keeper.ts`: liquidates first, then settles due requests, then sends up to 3 `claim`s
+- `keeper/keeper.ts`: liquidates first, then settles due closes before due opens (at most
+  `OPENS_PER_TICK`, default 5, in ticket order: a ticket when first seen, a fresh one after each try; an open the backing check refuses is
+  retried after a jittered backoff of 1 to 64 ticks, sooner once a close or liquidation frees
+  room; `refreshEntryBounds` at most every 100 ticks), then sends up to 3 `claim`s
   (the scan rotates, so one winner whose transfer keeps reverting holds up nobody), then pokes when the oracle has
   drifted a quarter of `maxJumpBps` from the latch's anchor. One batched read a tick through
   Multicall3 and one budget for every RPC request (`RPC_PER_MIN`, default 90; the public RPC
@@ -85,8 +88,8 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   (`keeper/campana.mjs` for NYSE, 2026 and 2027; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
   outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
-  `POOL_ABI=v1` for a pool deployed before the pauser role and `claim()` (testnet 0x183A…), set
-  explicitly rather than guessed from a failed call.
+  `POOL_ABI=v1` for a pool deployed before the pauser role, `claim()` and the backing check
+  (testnet 0x183A…), set explicitly rather than guessed from a failed call.
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
   `deploy/cohost/` runs it as a systemd service on an existing Linux host.
 
