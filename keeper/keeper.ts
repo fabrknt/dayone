@@ -178,7 +178,9 @@ const openRetry = new Map<bigint, { at: number; wait: number }>();
 const ticket = new Map<bigint, number>();
 let nextTicket = 0;
 function byTicket(ids: bigint[]): bigint[] {
-  for (const id of ids) if (!ticket.has(id)) ticket.set(id, nextTicket++); // new ones queue in id order
+  // new ones queue in request order (id), not in activeIds() order, which a removal reshuffles
+  const unseen = ids.filter((id) => !ticket.has(id)).sort((a, b) => (a < b ? -1 : 1));
+  for (const id of unseen) ticket.set(id, nextTicket++);
   return ids.sort((a, b) => ticket.get(a)! - ticket.get(b)!);
 }
 let refreshedAt = -Infinity;
