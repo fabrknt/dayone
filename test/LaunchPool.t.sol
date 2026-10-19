@@ -848,6 +848,37 @@ contract LaunchPoolTest is Test {
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
+    /// A real crash trips the latch and liquidation waits with everything else. The pool is the
+    /// only counterparty and a loser loses at most its margin, so waiting costs the pool only the
+    /// income it would have had: nothing is owed for the loss past the margin, whichever way the
+    /// price goes next.
+    function test_liquidationWaitingOnLatchOwesNothing() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 20); // $20K notional, liquidated near -3.75%
+        uint256 before = pool.poolBalance(); // the $10 open fee
+        setPx(245_000); // -30% in one update: the loss would be $6,000 on $1,000 margin
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.Jump, 3000, 200));
+        pool.liquidate(id);
+        assertEq(pool.equity(245e18), before); // the open loss is not the pool's to pay
+        assertEq(pool.totalDebt(), 0);
+
+        uint256 snap = vm.snapshotState();
+        // the operator rearms at the crash price: liquidation takes exactly the margin
+        pool.rearm(245e18);
+        pool.liquidate(id);
+        assertEq(pool.poolBalance(), before + 1_000 * USDC);
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 1_010 * USDC);
+
+        vm.revertToState(snap);
+        // or the price comes back first: the trader escapes, the pool still owes nothing
+        setPx(349_000);
+        vm.expectRevert(LaunchPool.NotLiquidatable.selector);
+        pool.liquidate(id);
+        close(alice, id);
+        assertGt(pool.poolBalance(), before);
+        assertEq(pool.totalDebt(), 0);
+        assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
+    }
+
     function test_refusesOutOfTurnCalls() public {
         vm.prank(alice);
         uint256 pending = pool.requestOpen(true, 1_000 * USDC, 10);

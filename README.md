@@ -30,7 +30,13 @@ market's deployer while the book is thin, and retired once it is deep enough.
   valuation in shares the contract holds, so no early holder owns the pool.
 - **Settlement.** Two-step: request, then anyone settles after `settleDelay` at HL's oracle read
   through hl-price-guard's `HLPriceGuard` (bounds, an independent reference, a jump latch). Any
-  breach makes settlement and liquidation wait.
+  breach makes settlement and liquidation wait. Liquidation stays behind the guard on purpose:
+  the pool is every trade's only counterparty and a loser loses at most its margin, so a waiting
+  liquidation owes nobody anything; the pool only misses income, and a loser escapes if the
+  price comes back first. An unguarded liquidation price would let whoever moves the operator's
+  oracle and the pushable mark liquidate traders at a false price
+  (`test_liquidationWaitingOnLatchOwesNothing`). Funding, if added, must accrue by time, not per
+  call.
 - **Caps.** Opens and closes each have a rolling notional cap (`ExposureBudget.Rolling`), so opens
   cannot use up the budget due closes need; net open interest is capped too. On replay of
   Papertrade's 10-10 incident, the per-minute cap is what made the push unprofitable; choosing the
@@ -107,4 +113,4 @@ Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 cl
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; a claim button in the
 web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (51 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
+`forge test` (52 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
