@@ -16,7 +16,7 @@ P2=$(cast wallet address $K2)
 # are always in the future, whatever day this runs
 anvil --port $PORT --timestamp 1792108800 --silent &
 ANVIL=$!
-trap 'kill $ANVIL ${KP:-} 2>/dev/null' EXIT
+trap 'kill $ANVIL' EXIT
 until cast block-number --rpc-url $RPC >/dev/null 2>&1; do sleep 0.2; done
 
 forge build --silent
@@ -118,8 +118,9 @@ echo "9. a winner the token refuses to pay (blocked) does not hold up the next o
 K3=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6
 T3=$(cast wallet address $K3)
 px 350000
-# until the claim check, the keeper sends no claims (CLAIMS_PER_TICK=0)
-k0() { RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 CLAIMS_PER_TICK=0 node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | sed 's/^[^ ]* /  keeper: /'; }
+# until the claim check, the keeper sends no claims: POOL_ABI=v1 skips them (opensPaused still
+# reads on this pool, and without MARKET_HOURS nothing else differs)
+k0() { RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 POOL_ABI=v1 node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | sed 's/^[^ ]* /  keeper: /'; }
 forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
 POOL=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['pool'])")
 USDC=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['usdc'])")
@@ -143,16 +144,16 @@ cast send -q --rpc-url $RPC --private-key $K0 $POOL "requestClose(uint256)" 3
 later 3; k0
 check "queue paid" "$(cast call --rpc-url $RPC $POOL "totalDebt()(uint256)" | cut -d' ' -f1)" 0
 BEFORE=$(cast call --rpc-url $RPC $USDC "balanceOf(address)(uint256)" $T1 | cut -d' ' -f1)
-# one long-running keeper, as in production (the scan position lives in the process)
+# a keeper restarted every tick (the worst case: the scan position lives in the process), one
+# debt scanned per tick: each fresh process starts at a clock-derived offset, so it gets past
+# the blocked debt 0
 KLOG=$(mktemp)
-RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 CLAIM_SCAN=1 TICK_MS=300 node --disable-warning=ExperimentalWarning keeper/keeper.ts > $KLOG 2>&1 &
-KP=$!
-for i in $(seq 1 40); do
+for i in $(seq 1 20); do
+  RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 CLAIM_SCAN=1 TICK_MS=300 node --disable-warning=ExperimentalWarning keeper/keeper.ts --once >> $KLOG 2>&1
   [ "$(cast call --rpc-url $RPC $POOL "claimable(uint256)(uint256)" 1 | cut -d' ' -f1)" = 0 ] && break
-  sleep 0.25
+  sleep 0.35
 done
-kill $KP; wait $KP 2>/dev/null || true
-grep -E "claim" $KLOG | sed 's/^[^ ]* /  keeper: /'
+grep -E "claim" $KLOG | sort | uniq -c | sed 's/^ */  /; s/ [0-9T:.-]*Z / keeper: /; s/ 0x[0-9a-f]*$//'
 check "next winner paid despite the blocked one ahead" "$(( $(cast call --rpc-url $RPC $USDC "balanceOf(address)(uint256)" $T1 | cut -d' ' -f1) - BEFORE ))" 807500000
 check "blocked winner's part still claimable" "$(cast call --rpc-url $RPC $POOL "claimable(uint256)(uint256)" 0 | cut -d' ' -f1)" 707500000
 echo "all ok"

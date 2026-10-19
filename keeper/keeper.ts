@@ -148,10 +148,18 @@ const v1 = process.env.POOL_ABI === "v1";
 if (process.env.POOL_ABI && !v1) throw new Error(`POOL_ABI must be v1 or unset, got ${process.env.POOL_ABI}`);
 const pauseFns = v1 ? { read: "opensPaused", set: "setOpensPaused" } : { read: "hoursPaused", set: "setHoursPaused" };
 const claims = !v1;
-const CLAIMS_PER_TICK = Number(process.env.CLAIMS_PER_TICK ?? 3); // a long queue drains over several ticks, inside the RPC budget
-const CLAIM_SCAN = BigInt(process.env.CLAIM_SCAN ?? 50); // debts read per tick (e2e sets 1 to test the rotation)
+function intEnv(name: string, dflt: number, max: number) {
+  const v = Number(process.env[name] ?? dflt);
+  if (!Number.isInteger(v) || v < 1 || v > max) throw new Error(`${name} must be an integer in [1, ${max}], got ${process.env[name]}`);
+  return v;
+}
+const CLAIMS_PER_TICK = intEnv("CLAIMS_PER_TICK", 3, 20); // a long queue drains over several ticks, inside the RPC budget
+const CLAIM_SCAN = BigInt(intEnv("CLAIM_SCAN", 50, 200)); // debts read per tick (e2e sets 1 to test the rotation)
 let claimFrom = 0n; // every debt below this is fully claimed
-let scanAt = 0n; // where the next scan starts: rotates over the paid part of the queue
+// Where the next scan starts; it rotates over the paid part of the queue. A fresh process starts
+// at an offset taken from the clock, not at 0, so a keeper that keeps restarting still reaches
+// every debt instead of rescanning the same first window behind a claim that always fails.
+let scanAt: bigint | undefined;
 
 async function tick() {
   if (!asset) {
@@ -224,7 +232,8 @@ async function sendClaims(): Promise<number> {
   const [rawCount, rawPaid] = await batch([poolCall("debtCount"), poolCall("debtPaid")]);
   const count = poolResult("debtCount", rawCount) as bigint;
   const paid = poolResult("debtPaid", rawPaid) as bigint;
-  if (scanAt < claimFrom || scanAt >= count) scanAt = claimFrom;
+  if (scanAt === undefined && count > 0n) scanAt = (BigInt(Math.floor(Date.now() / TICK_MS)) * CLAIM_SCAN) % count;
+  if (scanAt === undefined || scanAt < claimFrom || scanAt >= count) scanAt = claimFrom;
   const end = scanAt + CLAIM_SCAN < count ? scanAt + CLAIM_SCAN : count;
   const ids: bigint[] = [];
   for (let i = scanAt; i < end; i++) ids.push(i);
