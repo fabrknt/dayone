@@ -169,10 +169,12 @@ let claimFrom = 0n; // every debt below this is fully claimed
 let scanAt: bigint | undefined;
 // A pending open that would not settle (beyond the pool's backing, paused, queued winners) is
 // retried after roughly 1, 2, 4 … 64 ticks, jittered so a pile of them does not come due
-// together, and at most OPENS_PER_TICK are tried a tick (the longest-waiting first). A close or
-// liquidation that goes through can make room, so it makes every pending open due again.
+// together, and at most OPENS_PER_TICK are tried a tick, least recently tried first, so every
+// one gets its turn. A close or liquidation that goes through can make room, so it makes every
+// pending open due again (keeping that order).
 let tickNo = 0;
 const openRetry = new Map<bigint, { at: number; wait: number }>();
+const lastTried = new Map<bigint, number>();
 let refreshedAt = -Infinity;
 
 async function tick() {
@@ -237,13 +239,22 @@ async function tick() {
       if (margin + pnl < maintenance) liquidations.push(id);
     }
   }
-  opens.sort((a, b) => (openRetry.get(a)?.at ?? 0) - (openRetry.get(b)?.at ?? 0));
+  opens.sort((a, b) => (lastTried.get(a) ?? -1) - (lastTried.get(b) ?? -1));
   // the order matters when the RPC budget is tight: what protects the pool first
   let roomMade = false;
   for (const id of liquidations) if (await send("liquidate", [id])) roomMade = true;
   for (const id of closes) if (await send("settle", [id])) roomMade = true;
-  if (roomMade) openRetry.clear();
+  if (roomMade) {
+    for (const r of openRetry.values()) r.at = 0;
+    // opens skipped this tick for their backoff are due now too
+    for (const [i, id] of ids.entries()) {
+      const [owner, , , , entry, requestedAt] = poolResult("positions", rows[i]);
+      if (owner !== "0x0000000000000000000000000000000000000000" && entry === 0n && now >= requestedAt + settleDelay && !opens.includes(id)) opens.push(id);
+    }
+    opens.sort((a, b) => (lastTried.get(a) ?? -1) - (lastTried.get(b) ?? -1));
+  }
   for (const id of opens.slice(0, OPENS_PER_TICK)) {
+    lastTried.set(id, tickNo);
     if (await send("settle", [id])) {
       openRetry.delete(id);
       continue;
@@ -257,6 +268,7 @@ async function tick() {
     }
   }
   for (const id of openRetry.keys()) if (!ids.includes(id)) openRetry.delete(id); // cancelled or settled elsewhere
+  for (const id of lastTried.keys()) if (!ids.includes(id)) lastTried.delete(id);
   const settlements = [...closes, ...opens];
   let claimed = 0;
   if (rawUnclaimed && poolResult("unclaimed", rawUnclaimed) > 0n) claimed = await sendClaims();
