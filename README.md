@@ -62,6 +62,8 @@ market's deployer while the book is thin, and retired once it is deep enough.
   guard, and the optimizer on (21.9 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
+When to retire the pool (graduation criteria, a deadline, stop conditions, what stays
+undecided with the operator): `docs/graduation.md` (Japanese, a draft until an operator signs on).
 
 ## Layout
 - `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (46 tests, including regressions for review
@@ -129,6 +131,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet.
+on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
+close positions left open after graduation (`docs/graduation.md`, to settle with an operator).
 
 `forge test` (59 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
