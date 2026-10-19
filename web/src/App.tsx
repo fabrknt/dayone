@@ -119,7 +119,7 @@ export default function App() {
 
   const marginUnits = BigInt(Math.max(0, Math.floor(Number(margin) || 0))) * USDC;
   const notional = marginUnits * BigInt(lev);
-  const fee = pool ? (notional * BigInt(pool.feeBps)) / 10000n : 0n;
+  const fee = pool ? (notional * BigInt(pool.feeBps) + 9999n) / 10000n : 0n; // rounded up, as the pool does
 
   const open = async () => {
     if (!cfg || !me) return;

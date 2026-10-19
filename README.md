@@ -48,7 +48,7 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (19.4 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (19.5 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
@@ -107,10 +107,11 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 8, 8b (keeper) | CHANGES | the 30% gas padding could pass the 2M small-block cap (root cause: the unbounded debt-queue loop), no budget across RPC requests, transport retries, poke before liquidate. Fixed in 5641c9b and d5d9a52; the loop itself in round 9 |
 | 9 (d1208dd) | CHANGES | pauser role and the O(1) debt queue: contract checked and cleared (FIFO, no over- or under-payment, unclaimed money outside redemption and minting, a blocked winner no longer stops settles, nothing queue-length-dependent in settle, liquidate, redeem or claim). Two keeper findings: an empty RPC answer looked like an old pool and stuck; a claim that always reverts starved debts past the 50-entry scan. Fixed in 1f1e34c (`POOL_ABI=v1` explicit; rotating scan) |
 | 9b, 9c (keeper) | CHANGES, CHANGES | claims only: the scan position lived in the process, so restarts every tick (then restarts at a cadence that resonated with a clock-derived start) never got past a head claim that always fails; `CLAIMS_PER_TICK=0` stopped claims. Fixed in 96bdea4 and the next commit: knobs validated, random start per process, a wrap to the front within the tick. `keeper/claims.test.mjs` runs the real `sendClaims` through those cases. Not re-reviewed: no HIGH, and `claim(id)` is open to anyone, so a stuck keeper delays a winner but cannot keep the money from them |
+| 10 (ca11829) | CHANGES | a full arithmetic audit of every expression. Freezes only at price scales HL never uses (szDecimals above 6: PnL, haircut and equity products overflow) or after a share price driven toward zero overflowed the share count; fees, haircuts, maintenance and losses could round a base unit toward the trader. Fixed: szDecimals ≤ 6 checked at deploy, a rebate past `MAX_SHARES` (2^128) is skipped instead of blocking the close, those four round in the pool's favor (`test_r10_arithmeticLimits`). Left as is: at most one base unit of pool-favoring dust per position, mint or redemption |
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; a claim button in the
 web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (52 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
+`forge test` (53 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.

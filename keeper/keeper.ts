@@ -215,9 +215,10 @@ async function tick() {
     }
     if (entry !== 0n) {
       const notional = margin * BigInt(leverage);
-      const move = ((oracle - entry) * notional) / entry;
-      const equity = margin + (long ? move : -move);
-      if (equity < (notional * BigInt(maintenanceBps)) / 10000n) liquidations.push(id);
+      // as the pool rounds: PnL toward minus infinity, the maintenance level up
+      const x = (long ? oracle - entry : entry - oracle) * notional;
+      const pnl = x / entry - (x < 0n && x % entry !== 0n ? 1n : 0n);
+      if (margin + pnl < (notional * BigInt(maintenanceBps) + 9999n) / 10000n) liquidations.push(id);
     }
   }
   // the order matters when the RPC budget is tight: what protects the pool first

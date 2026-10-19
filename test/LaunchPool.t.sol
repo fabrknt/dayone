@@ -879,6 +879,36 @@ contract LaunchPoolTest is Test {
         assertEq(usdc.balanceOf(address(pool)), pool.poolBalance());
     }
 
+    /// Codex round 10: the arithmetic limits. Prices beyond HL's scale are refused at deploy;
+    /// fees round up; a rebate that would overflow the share count is skipped and the loss
+    /// still settles.
+    function test_r10_arithmeticLimits() public {
+        HLPriceGuard.Bounds memory b = HLPriceGuard.Bounds(25, 25, 20, 150);
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 7), b, defaultParams(), 0, 1 days);
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 6), b, defaultParams(), 0, 1 days);
+
+        // $100.0001 notional at 5 bp is $0.05000005 of fee: charged as 50,001 base units
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice);
+        pool.requestOpen(true, 100_000_100, 1);
+        assertEq(before - usdc.balanceOf(alice), 100_000_100 + 50_001);
+
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        setPx(349_000);
+        close(alice, id); // a small loss: the first mint
+        assertGt(pool.totalShares(), 0);
+        vm.store(address(pool), bytes32(uint256(22)), bytes32(pool.MAX_SHARES() - 1)); // totalShares
+        uint256 total = pool.totalShares();
+        id = open(bob, true, 1_000 * USDC, 10);
+        setPx(344_750);
+        pool.poke();
+        setPx(340_000);
+        close(bob, id); // a $285 loss: the rebate would overflow MAX_SHARES
+        assertEq(pool.shares(bob), 0);
+        assertEq(pool.totalShares(), total);
+    }
+
     function test_refusesOutOfTurnCalls() public {
         vm.prank(alice);
         uint256 pending = pool.requestOpen(true, 1_000 * USDC, 10);

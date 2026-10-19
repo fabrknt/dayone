@@ -36,6 +36,12 @@ contract LaunchPool {
     using HLPriceGuard for HLPriceGuard.JumpLatch;
 
     uint16 public constant MIN_REDEEM_BUFFER_BPS = 100;
+    /// HL perp prices have `6 - szDecimals` decimals, so szDecimals is at most 6. Larger values
+    /// would scale prices far enough to overflow the PnL and equity products.
+    uint8 public constant MAX_SZ_DECIMALS = 6;
+    /// A rebate that would push the share count past this is skipped, so a share price driven
+    /// toward zero can never overflow the count and block a close or liquidation.
+    uint256 public constant MAX_SHARES = 2 ** 128;
 
     struct Params {
         uint16 maxLeverage;
@@ -181,6 +187,7 @@ contract LaunchPool {
         uint64 paramsDelay_
     ) {
         _validate(params_);
+        if (asset_.szDecimals > MAX_SZ_DECIMALS) revert BadParams();
         collateral = collateral_;
         paramsDelay = paramsDelay_;
         operator = msg.sender;
@@ -299,7 +306,7 @@ contract LaunchPool {
         uint256 notional = margin * leverage;
         if (notional < P.minNotional || notional > P.maxNotional) revert BadRequest();
         // the open fee is collected on top of margin, so notional stays margin * leverage
-        uint256 openFee = notional * P.feeBps / 10_000;
+        uint256 openFee = _bpsUp(notional, P.feeBps);
         collateral.transferFrom(msg.sender, address(this), margin + openFee);
         pendingOpens += margin + openFee;
         id = nextId++;
@@ -370,7 +377,7 @@ contract LaunchPool {
         uint256 price = _price();
         uint256 notional = p.margin * p.leverage;
         int256 posEquity = int256(p.margin) + _pnl(p, price);
-        if (posEquity >= int256(notional * p.maintenanceBps / 10_000)) revert NotLiquidatable();
+        if (posEquity >= int256(_bpsUp(notional, p.maintenanceBps))) revert NotLiquidatable();
         _remove(id);
         _reduceOI(p.long, notional, p.margin, p.entry);
         uint256 left = posEquity > 0 ? uint256(posEquity) : 0;
@@ -480,6 +487,11 @@ contract LaunchPool {
         delete positions[id];
     }
 
+    /// Fees, maintenance and haircuts: rounded up, in the pool's favor.
+    function _bpsUp(uint256 amount, uint256 bps) internal pure returns (uint256) {
+        return (amount * bps + 9_999) / 10_000;
+    }
+
     function _mulUp(uint256 a, uint256 b) internal pure returns (uint256) {
         return (a * b + 1e18 - 1) / 1e18;
     }
@@ -542,10 +554,14 @@ contract LaunchPool {
         return p.entry == 0 ? 0 : _haircutBps(p.haircut, p.entry, price);
     }
 
-    function _pnl(Position memory p, uint256 price) internal pure returns (int256) {
+    /// Rounded down (toward minus infinity), so neither side gains from the division.
+    function _pnl(Position memory p, uint256 price) internal pure returns (int256 pnl) {
         int256 notional = int256(p.margin * p.leverage);
-        int256 move = (int256(price) - int256(p.entry)) * notional / int256(p.entry);
-        return p.long ? move : -move;
+        int256 move = int256(price) - int256(p.entry);
+        int256 x = (p.long ? move : -move) * notional;
+        int256 e = int256(p.entry);
+        pnl = x / e;
+        if (x < 0 && x % e != 0) pnl -= 1;
     }
 
     function _close(uint256 id, Position storage ps, uint256 price) internal {
@@ -553,13 +569,13 @@ contract LaunchPool {
         _remove(id);
         uint256 notional = p.margin * p.leverage;
         _reduceOI(p.long, notional, p.margin, p.entry);
-        uint256 fee = notional * p.feeBps / 10_000;
+        uint256 fee = _bpsUp(notional, p.feeBps);
         int256 pnl = _pnl(p, price) - int256(fee);
         uint256 paid;
         uint256 queued;
         if (pnl >= 0) {
             // net of the close fee and the win haircut, both of which stay in the pool
-            uint256 profit = uint256(pnl) - uint256(pnl) * _haircutBps(p.haircut, p.entry, price) / 10_000;
+            uint256 profit = uint256(pnl) - _bpsUp(uint256(pnl), _haircutBps(p.haircut, p.entry, price));
             paid = profit <= poolBalance ? profit : poolBalance;
             poolBalance -= paid;
             queued = profit - paid;
@@ -610,6 +626,7 @@ contract LaunchPool {
         } else {
             s_ = value * totalShares / (v - value);
         }
+        if (totalShares + s_ + locked > MAX_SHARES) return; // the rebate is skipped, the loss still settles
         shares[to] += s_;
         if (locked != 0) shares[address(this)] += locked;
         totalShares += s_ + locked;
