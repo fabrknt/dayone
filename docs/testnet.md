@@ -78,6 +78,9 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
    run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
+   For the current deployment (0x183A…, deployed before the pauser role and `claim()`) add
+   `POOL_ABI=v1`: the keeper then uses `setOpensPaused` with the operator key, and settle pays
+   queued winners itself. `deploy/cohost/bundle.sh` writes it into `keeper.env`.
    `MARKET_HOURS=nyse` pauses new positions while NYSE is closed; use `krx` for xyz:SKHX or xyz:SMSN.
    That needs the pool's pauser key (`PAUSER=<keeper address>` at step 3, or later
    `cast send $POOL "setPauser(address)" <keeper address>` from the operator key) or the operator key.

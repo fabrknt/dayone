@@ -18,6 +18,7 @@
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
 import { readFileSync } from "node:fs";
+import { randomInt } from "node:crypto";
 import {
   createPublicClient, createWalletClient, http, custom, decodeAbiParameters, encodeAbiParameters,
   encodeFunctionData, decodeFunctionResult, parseAbi,
@@ -157,8 +158,8 @@ const CLAIMS_PER_TICK = intEnv("CLAIMS_PER_TICK", 3, 20); // a long queue drains
 const CLAIM_SCAN = BigInt(intEnv("CLAIM_SCAN", 50, 200)); // debts read per tick (e2e sets 1 to test the rotation)
 let claimFrom = 0n; // every debt below this is fully claimed
 // Where the next scan starts; it rotates over the paid part of the queue. A fresh process starts
-// at an offset taken from the clock, not at 0, so a keeper that keeps restarting still reaches
-// every debt instead of rescanning the same first window behind a claim that always fails.
+// at a random debt, not at 0 or a clock-derived one (a restart cadence could resonate with it), so
+// a keeper that keeps restarting still reaches every debt behind a claim that always fails.
 let scanAt: bigint | undefined;
 
 async function tick() {
@@ -225,42 +226,67 @@ async function tick() {
   if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length + claimed === 0) await send("poke");
 }
 
-/// Sends up to CLAIMS_PER_TICK winners their paid part. Each tick scans the next CLAIM_SCAN
-/// debts from where the last one stopped and wraps at the end of the paid part, so a debt whose
-/// claim keeps failing is retried on later passes but never holds up the ones after it.
+/// Sends up to CLAIMS_PER_TICK winners their paid part. Each tick reads up to CLAIM_SCAN debts,
+/// carrying on from where the last tick stopped; on reaching the unpaid part (or the end) it
+/// wraps to claimFrom within the same tick. So a debt whose claim keeps failing is retried on
+/// later passes but never holds up the ones after it.
 async function sendClaims(): Promise<number> {
   const [rawCount, rawPaid] = await batch([poolCall("debtCount"), poolCall("debtPaid")]);
   const count = poolResult("debtCount", rawCount) as bigint;
   const paid = poolResult("debtPaid", rawPaid) as bigint;
-  if (scanAt === undefined && count > 0n) scanAt = (BigInt(Math.floor(Date.now() / TICK_MS)) * CLAIM_SCAN) % count;
-  if (scanAt === undefined || scanAt < claimFrom || scanAt >= count) scanAt = claimFrom;
-  const end = scanAt + CLAIM_SCAN < count ? scanAt + CLAIM_SCAN : count;
-  const ids: bigint[] = [];
-  for (let i = scanAt; i < end; i++) ids.push(i);
-  const rows = ids.length ? await batch(ids.map((i) => poolCall("debts", [i]))) : [];
+  if (count <= claimFrom) return 0;
+  // a fresh process starts at a random debt: restarts at any cadence still reach every one
+  if (scanAt === undefined) scanAt = claimFrom + BigInt(randomInt(Number(count - claimFrom > 1_000_000n ? 1_000_000n : count - claimFrom)));
+  if (scanAt < claimFrom || scanAt >= count) scanAt = claimFrom;
+  let budget = CLAIM_SCAN;
   let sent = 0;
-  let front = scanAt === claimFrom; // only a scan from the fully claimed prefix can extend it
-  let next = end; // past the window: the next scan carries on from here
-  for (const [k, i] of ids.entries()) {
-    const [, start, amount, done] = poolResult("debts", rows[k]) as [Address, bigint, bigint, bigint];
-    if (start >= paid) {
-      next = claimFrom; // the queue is paid in order: nothing from here on is paid yet; wrap
+  let wrapped = false;
+  let pos = scanAt;
+  while (budget > 0n && sent < CLAIMS_PER_TICK) {
+    const end = pos + budget < count ? pos + budget : count;
+    const ids: bigint[] = [];
+    for (let i = pos; i < end; i++) ids.push(i);
+    const rows = ids.length ? await batch(ids.map((i) => poolCall("debts", [i]))) : [];
+    let front = pos === claimFrom; // only a scan from the fully claimed prefix can extend it
+    let next = end;
+    let atUnpaid = false;
+    let examined = 0n;
+    for (const [k, i] of ids.entries()) {
+      const [, start, amount, done] = poolResult("debts", rows[k]) as [Address, bigint, bigint, bigint];
+      examined++; // only what was looked at counts against the budget, so a wrap still has some
+      if (start >= paid) {
+        atUnpaid = true; // the queue is paid in order: nothing from here on is paid yet
+        break;
+      }
+      if (sent === CLAIMS_PER_TICK) {
+        next = i; // out of claims this tick: start here next time
+        break;
+      }
+      const upTo = paid - start < amount ? paid - start : amount;
+      let claimedAll = done === amount;
+      if (upTo > done && (await send("claim", [i]))) {
+        sent++;
+        claimedAll = upTo === amount;
+      }
+      if (front && claimedAll) claimFrom = i + 1n;
+      else front = false;
+    }
+    budget -= examined;
+    if (sent === CLAIMS_PER_TICK && !atUnpaid && next < end) {
+      pos = next;
       break;
     }
-    if (sent === CLAIMS_PER_TICK) {
-      next = i; // out of claims this tick: start here next time
-      break;
-    }
-    const upTo = paid - start < amount ? paid - start : amount;
-    let claimedAll = done === amount;
-    if (upTo > done && (await send("claim", [i]))) {
-      sent++;
-      claimedAll = upTo === amount;
-    }
-    if (front && claimedAll) claimFrom = i + 1n;
-    else front = false;
+    if (atUnpaid || next >= count) {
+      // wrap to the front, once a tick; stop if this pass already started there
+      if (wrapped || pos === claimFrom) {
+        pos = claimFrom;
+        break;
+      }
+      wrapped = true;
+      pos = claimFrom;
+    } else pos = next;
   }
-  scanAt = next >= count ? claimFrom : next;
+  scanAt = pos >= count ? claimFrom : pos;
   return sent;
 }
 

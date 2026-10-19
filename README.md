@@ -11,7 +11,9 @@ The mechanism studied: a loss-funded counterparty pool for a newly listed HIP-3 
 market's deployer while the book is thin, and retired once it is deep enough.
 
 - **Loss-funded.** Starts empty; traders' losses and fees fill it. Profits the pool cannot pay yet
-  wait in a FIFO queue, paid from later losses (the Papertrade model).
+  wait in a FIFO queue, paid from later losses (the Papertrade model). Paying the queue costs the
+  same gas however long it is: income moves a cumulative counter, and `claim(id)` (anyone may
+  call it; the keeper does) sends each winner what the queue has paid them.
 - **Rebates and haircut.** Losers get pool shares worth `rebateBps` of their loss (default 12%).
   Winners give the pool a share of their profit that falls with the size of the price move:
   `winHaircutBps` (30%) up to `haircutFromMoveBps` (0.25%), `winHaircutMinBps` (15%) from
@@ -36,21 +38,27 @@ market's deployer while the book is thin, and retired once it is deep enough.
 - **Operator limits.** Parameter, bounds and reference changes take effect `paramsDelay` after
   they are proposed; raising the cap or changing its window also needs opens paused. Each
   position keeps the fee, haircut and maintenance it was opened with. `rearm` (after a real gap
-  trips the latch), pausing opens and `graduate()` are immediate.
+  trips the latch), pausing opens and `graduate()` are immediate. The keeper holds a separate
+  pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
+  operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (18.3 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (19.4 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (36 tests, including regressions for review
-  findings: `test_r1_*` to `test_r4_*`)
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (46 tests, including regressions for review
+  findings: `test_r1_*` to `test_r7_*`), `test/Invariant.t.sol` (random sequences of every action,
+  parameter changes, latch trips and rearms; after each step: tokens == books, the debt queue's
+  counters and order, per-side totals == positions, shares add up, equity <= shareValuation).
+  `forge coverage`: lines 100%, branches 96%.
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
-- `keeper/keeper.ts`: liquidates first, then settles due requests, then pokes when the oracle has
+- `keeper/keeper.ts`: liquidates first, then settles due requests, then sends up to 3 `claim`s
+  (the scan rotates, so one winner whose transfer keeps reverting holds up nobody), then pokes when the oracle has
   drifted a quarter of `maxJumpBps` from the latch's anchor. One batched read a tick through
   Multicall3 and one budget for every RPC request (`RPC_PER_MIN`, default 90; the public RPC
   allows 100), gas limits padded 30% under the 2M small-block cap (`TICK_MS`, default 1 s); with
@@ -58,6 +66,8 @@ Design, replay results and competitors: `docs/design.md` (Japanese).
   (`keeper/campana.mjs` for NYSE; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
   outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
+  `POOL_ABI=v1` for a pool deployed before the pauser role and `claim()` (testnet 0x183A…), set
+  explicitly rather than guessed from a failed call.
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
   `deploy/cohost/` runs it as a systemd service on an existing Linux host.
 
@@ -88,10 +98,13 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 6f–6h | CHANGES, CHANGES, APPROVE | install.sh: a linked key file could overwrite another file, an unauthenticated bundle with npm scripts as root, then a newline filename beating the checksum and a hash-then-extract race. Fixed in 7171c44 and e2ee339 (one private bundle copy, hashed and extracted; the script never deletes the upload). 6h: no HIGH left; three medium/low items recorded in docs/testnet.md |
 | 7 (26e8c21) | CHANGES | the falling win haircut. The curve was stored per position but the rebate was read live, so opening both sides while a valid change (flat 30%, rebate 29.99%) waited out paramsDelay paired the old 15% floor with the new rebate (+$48.90 for the pair; the flat haircut had the same hole). Fixed in e9c7a66: the rebate is stored per position too |
 | 7b (e9c7a66) | APPROVE | round 7 PoC closed (pair −$75.51); fee, maintenance, curve and rebate all used as stored on close and liquidation; the redeem buffer stays live by design |
+| 8, 8b (keeper) | CHANGES | the 30% gas padding could pass the 2M small-block cap (root cause: the unbounded debt-queue loop), no budget across RPC requests, transport retries, poke before liquidate. Fixed in 5641c9b and d5d9a52; the loop itself in round 9 |
+| 9 (d1208dd) | CHANGES | pauser role and the O(1) debt queue: contract checked and cleared (FIFO, no over- or under-payment, unclaimed money outside redemption and minting, a blocked winner no longer stops settles, nothing queue-length-dependent in settle, liquidate, redeem or claim). Two keeper findings: an empty RPC answer looked like an old pool and stuck; a claim that always reverts starved debts past the 50-entry scan. Fixed in 1f1e34c (`POOL_ABI=v1` explicit; rotating scan) |
+| 9b, 9c (keeper) | CHANGES, CHANGES | claims only: the scan position lived in the process, so restarts every tick (then restarts at a cadence that resonated with a clock-derived start) never got past a head claim that always fails; `CLAIMS_PER_TICK=0` stopped claims. Fixed in 96bdea4 and the next commit: knobs validated, random start per process, a wrap to the front within the tick. `keeper/claims.test.mjs` runs the real `sendClaims` through those cases. Not re-reviewed: no HIGH, and `claim(id)` is open to anyone, so a stuck keeper delays a winner but cannot keep the money from them |
 
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); calendars beyond 2026 and other exchanges; bounding the debt queue paid in one transaction
-(`_income` pays every queued winner it can; Codex round 8b, recorded); audit; mainnet.
+on a local machine until then); calendars beyond 2026 and other exchanges; a claim button in the
+web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (36 tests); `npm install && ./keeper/e2e.sh` (12 checks); `node --test keeper/krx.test.mjs`.
+`forge test` (51 tests); `npm install && ./keeper/e2e.sh` (21 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
