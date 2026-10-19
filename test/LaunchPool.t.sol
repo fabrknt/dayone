@@ -945,7 +945,7 @@ contract LaunchPoolTest is Test {
     function test_backingLimitsOpensToTheBalance() public {
         LaunchPool p = _backedPool();
         uint256 id = _requestAndWait(p, alice, true, 1_000 * USDC, 20);
-        // $20K long: +10% owes $2,000 profit plus the side's $1,000 margin; the balance is the $10 fee
+        // $20K long: +10% owes $2,000; the balance is the $10 fee
         vm.expectPartialRevert(LaunchPool.BeyondBacking.selector);
         p.settle(id);
         vm.prank(alice);
@@ -956,20 +956,68 @@ contract LaunchPoolTest is Test {
         id = _requestAndWait(p, alice, true, 1_000 * USDC, 20);
         p.settle(id);
         (uint256 up, uint256 down) = p.stressOwed(350e18);
-        assertApproxEqAbs(up, 3_000 * USDC, 1_000); // units and the stressed price round up
+        assertApproxEqAbs(up, 2_000 * USDC, 1_000); // units and the stressed price round up
         assertEq(down, 0); // longs lose on the way down
-        // another $60K long: +10% would owe $8,000 + $1,000 + $3,000 margin > $10,040
-        id = _requestAndWait(p, bob, true, 3_000 * USDC, 20);
+        // another $100K long: +10% would owe $12,000 > $10,060
+        id = _requestAndWait(p, bob, true, 5_000 * USDC, 20);
         vm.expectPartialRevert(LaunchPool.BeyondBacking.selector);
         p.settle(id);
         vm.prank(bob);
         p.cancelOpen(id);
-        // a short of the same size adds its own side's bound only on the way down
+        // $60K more fits: +10% owes $8,000
+        id = _requestAndWait(p, bob, true, 3_000 * USDC, 20);
+        p.settle(id);
+        // a short adds its own side's bound only on the way down
         id = _requestAndWait(p, bob, false, 1_000 * USDC, 20);
         p.settle(id);
         (up, down) = p.stressOwed(350e18);
-        assertApproxEqAbs(up, 3_000 * USDC, 1_000);
-        assertApproxEqAbs(down, 3_000 * USDC, 1_000);
+        assertApproxEqAbs(up, 8_000 * USDC, 1_000);
+        assertApproxEqAbs(down, 2_000 * USDC, 1_000);
+    }
+
+    /// Codex round 11: a long far past its margin must not offset another long's win. The bound
+    /// treats every long as entered at the lowest long entry, so the old cheap long counts in full.
+    function test_backingDoesNotNetOverlosses() public {
+        LaunchPool p = _backedPool();
+        p.seed(10_000 * USDC);
+        uint256 cheap = _requestAndWait(p, alice, true, 100 * USDC, 20); // $2K at $350
+        p.settle(cheap);
+        for (uint256 i = 1; i <= 15; i++) { // up to $455 in latch-sized steps
+            setPx(uint64(350_000 + 7_000 * i));
+            p.poke();
+        }
+        uint256 dear = _requestAndWait(p, bob, true, 100 * USDC, 20); // $2K at $455
+        p.settle(dear);
+        assertEq(p.longEntryMin(), 350e18);
+        // every long counted from $350: +10% from $455 is about (500.5 - 350) * all units
+        (uint256 up,) = p.stressOwed(455e18);
+        uint256 units = p.longUnits();
+        assertGe(up, units * (500.5e18 - 350e18) / 1e18);
+        // closing the cheap one leaves the bound where it was until a refresh
+        vm.prank(alice);
+        p.requestClose(cheap);
+        vm.warp(block.timestamp + 3);
+        p.settle(cheap);
+        assertEq(p.longEntryMin(), 350e18);
+        p.refreshEntryBounds();
+        assertEq(p.longEntryMin(), 455e18);
+    }
+
+    /// Off only on a local chain; elsewhere at least MIN_STRESS_BPS, at deploy and on proposal.
+    function test_stressFloorOutsideLocalChains() public {
+        LaunchPool p = _backedPool();
+        vm.chainId(998);
+        LaunchPool.Params memory params = p.getParams();
+        params.stressMoveBps = 0;
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        p.proposeParams(params, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        params.stressMoveBps = 499;
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        p.proposeParams(params, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        params.stressMoveBps = 500;
+        p.proposeParams(params, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
+        vm.expectRevert(LaunchPool.BadParams.selector);
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), defaultParams(), 0, 1 days);
     }
 
     /// While a winner is queued nothing new opens: requests are refused and a pending open

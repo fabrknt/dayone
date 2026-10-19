@@ -166,8 +166,14 @@ let claimFrom = 0n; // every debt below this is fully claimed
 // at a random debt, not at 0 or a clock-derived one (a restart cadence could resonate with it), so
 // a keeper that keeps restarting still reaches every debt behind a claim that always fails.
 let scanAt: bigint | undefined;
+// A pending open that would not settle (beyond the pool's backing, paused, queued winners) is
+// retried after 1, 2, 4 … 64 ticks, so a pile of them cannot use up the RPC budget closes need.
+let tickNo = 0;
+const openRetry = new Map<bigint, { at: number; wait: number }>();
+let refreshedAt = -Infinity;
 
 async function tick() {
+  tickNo++;
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
@@ -207,13 +213,15 @@ async function tick() {
   const settleDelay = BigInt(p.settleDelay);
   const rows = ids.length ? await batch(ids.map((id) => poolCall("positions", [id]))) : [];
   const liquidations: bigint[] = [];
-  const settlements: bigint[] = [];
+  const closes: bigint[] = [];
+  const opens: bigint[] = [];
   for (const [i, id] of ids.entries()) {
     // maintenance is the one stored with the position when it was opened, as the contract uses
     const [owner, long, leverage, margin, entry, requestedAt, closing, , , maintenanceBps] = poolResult("positions", rows[i]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {
-      settlements.push(id);
+      if (closing) closes.push(id);
+      else if ((openRetry.get(id)?.at ?? 0) <= tickNo) opens.push(id);
       continue;
     }
     if (entry !== 0n) {
@@ -228,7 +236,22 @@ async function tick() {
   }
   // the order matters when the RPC budget is tight: what protects the pool first
   for (const id of liquidations) await send("liquidate", [id]);
-  for (const id of settlements) await send("settle", [id]);
+  for (const id of closes) await send("settle", [id]);
+  for (const id of opens) {
+    if (await send("settle", [id])) {
+      openRetry.delete(id);
+      continue;
+    }
+    const wait = Math.min((openRetry.get(id)?.wait ?? 0.5) * 2, 64);
+    openRetry.set(id, { at: tickNo + wait, wait });
+    // a close may have left the entry bounds looser than the open positions need
+    if (!v1 && tickNo - refreshedAt >= 100) {
+      refreshedAt = tickNo;
+      await send("refreshEntryBounds");
+    }
+  }
+  for (const id of openRetry.keys()) if (!ids.includes(id)) openRetry.delete(id); // cancelled or settled elsewhere
+  const settlements = [...closes, ...opens];
   let claimed = 0;
   if (rawUnclaimed && poolResult("unclaimed", rawUnclaimed) > 0n) claimed = await sendClaims();
   if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length + claimed === 0) await send("poke");

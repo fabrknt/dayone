@@ -39,6 +39,9 @@ contract LaunchPool {
     /// HL perp prices have `6 - szDecimals` decimals, so szDecimals is at most 6. Larger values
     /// would scale prices far enough to overflow the PnL and equity products.
     uint8 public constant MAX_SZ_DECIMALS = 6;
+    /// The smallest stress move a pool may use outside a local test chain (31337), where 0
+    /// turns the backing check off. Checked at deploy and on every proposal.
+    uint16 public constant MIN_STRESS_BPS = 500;
     /// A mint that would push the share count past this first divides every holding by
     /// REBASE (see _rebase), so a share price driven toward zero can never overflow the count
     /// and block a close or liquidation, and the rebate keeps being paid in shares.
@@ -67,8 +70,8 @@ contract LaunchPool {
         uint16 rebateBps; // value of shares minted per unit of loss; must be below winHaircutMinBps
         uint16 redeemBufferBps; // of net OI, held back from redemption on top of minReserve
         // A new position settles only if, after a move of this size either way, the pool could
-        // still pay every winner from its balance, and only while no winner is queued. 0 turns
-        // the check off (local tests); a deployed pool should not.
+        // still pay every winner from its balance, and only while no winner is queued. At least
+        // MIN_STRESS_BPS; 0 (off) only on a local test chain.
         uint16 stressMoveBps;
     }
 
@@ -141,6 +144,13 @@ contract LaunchPool {
     // understated (longs up, shorts down): open positions' PnL at price P without a loop
     uint256 public longUnits;
     uint256 public shortUnits;
+    // For the backing bound: how many positions are open per side, the lowest long entry and the
+    // highest short entry among them. Exact after an open; a close leaves them where they were
+    // (more conservative) until refreshEntryBounds() or the side empties.
+    uint256 public longCount;
+    uint256 public shortCount;
+    uint256 public longEntryMin;
+    uint256 public shortEntryMax;
 
     ExposureBudget.Rolling internal _openLane;
     ExposureBudget.Rolling internal _closeLane;
@@ -474,7 +484,35 @@ contract LaunchPool {
     /// never counted as the pool's, and one side's losers never offset the other side's winners.
     function equity(uint256 price) public view returns (uint256) {
         uint256 owed = owedAt(price);
+        uint256 e = profitBound(price); // owedAt nets a loser past its margin; this never nets
+        if (e > owed) owed = e;
         return owed >= poolBalance ? 0 : poolBalance - owed;
+    }
+
+    /// An upper bound on the profit open positions could be paid at `price` that never lets a
+    /// loser offset a winner: every long is treated as entered at the lowest long entry and
+    /// every short at the highest short entry. A long's profit is at most units * (price -
+    /// entry) since its units round up; a short's units round down, so one unit per short is
+    /// added. Haircuts and fees, which only lower payouts, are ignored.
+    function profitBound(uint256 price) public view returns (uint256 owed) {
+        if (longCount != 0 && price > longEntryMin) owed += _mulUp(longUnits, price - longEntryMin);
+        if (shortCount != 0 && price < shortEntryMax) owed += _mulUp(shortUnits + shortCount, shortEntryMax - price);
+    }
+
+    /// Bring longEntryMin and shortEntryMax back to the open positions' real extremes after
+    /// closes. Anyone; loops over the active list, so it only tightens the bound, never needed
+    /// for safety.
+    function refreshEntryBounds() external {
+        uint256 lo = type(uint256).max;
+        uint256 hi;
+        for (uint256 i; i < _active.length; i++) {
+            Position storage p = positions[_active[i]];
+            if (p.entry == 0) continue;
+            if (p.long && p.entry < lo) lo = p.entry;
+            if (!p.long && p.entry > hi) hi = p.entry;
+        }
+        if (longCount != 0) longEntryMin = lo;
+        if (shortCount != 0) shortEntryMax = hi;
     }
 
     /// The bound equity() subtracts: per side, the side's PnL at `price` plus the side's margin,
@@ -488,12 +526,13 @@ contract LaunchPool {
         return longOwed + shortOwed;
     }
 
-    /// What the pool would owe after a stressMoveBps move up and down from `price`. New
-    /// positions settle only while both stay within poolBalance.
+    /// The most the pool could owe in profit after a stressMoveBps move up and down from
+    /// `price` (profitBound; each side's bound is monotonic, so these two cover every price in
+    /// between). New positions settle only while both stay within poolBalance.
     function stressOwed(uint256 price) public view returns (uint256 up, uint256 down) {
         uint256 s = _params.stressMoveBps;
-        up = owedAt(price * (10_000 + s) / 10_000 + 1); // rounded away from the price
-        down = owedAt(price * (10_000 - s) / 10_000);
+        up = profitBound(price * (10_000 + s) / 10_000 + 1); // rounded away from the price
+        down = profitBound(price * (10_000 - s) / 10_000);
     }
 
     function _checkBacking(uint256 price) internal view {
@@ -517,14 +556,15 @@ contract LaunchPool {
 
     // ---- internals ----
 
-    function _validate(Params memory p) internal pure {
+    function _validate(Params memory p) internal view {
+        if (p.stressMoveBps >= 10_000) revert BadParams();
+        if (p.stressMoveBps < MIN_STRESS_BPS && !(p.stressMoveBps == 0 && block.chainid == 31337)) revert BadParams();
         // the rebate stays below the lowest point of the curve, so washing loses at every size
         if (p.rebateBps >= p.winHaircutMinBps) revert RebateNotBelowHaircut();
         if (p.winHaircutMinBps > p.winHaircutBps || p.haircutFromMoveBps >= p.haircutToMoveBps || p.haircutToMoveBps > 10_000) {
             revert BadParams();
         }
         if (p.redeemBufferBps < MIN_REDEEM_BUFFER_BPS) revert BadParams();
-        if (p.stressMoveBps >= 10_000) revert BadParams();
         if (p.minNotional == 0 || p.minNotional > p.maxNotional) revert BadParams();
         if (p.capWindow < ExposureBudget.SLICES || p.capWindow % ExposureBudget.SLICES != 0) revert BadParams();
         if (p.maxLeverage == 0 || p.winHaircutBps > 10_000 || p.feeBps > 1_000) revert BadParams();
@@ -569,10 +609,14 @@ contract LaunchPool {
     function _addOI(bool long, uint256 notional, uint256 margin, uint256 entry) internal {
         uint256 u = _units(long, notional, entry);
         if (long) {
+            if (longCount == 0 || entry < longEntryMin) longEntryMin = entry;
+            longCount += 1;
             longOI += notional;
             longMargin += margin;
             longUnits += u;
         } else {
+            if (shortCount == 0 || entry > shortEntryMax) shortEntryMax = entry;
+            shortCount += 1;
             shortOI += notional;
             shortMargin += margin;
             shortUnits += u;
@@ -582,10 +626,12 @@ contract LaunchPool {
     function _reduceOI(bool long, uint256 notional, uint256 margin, uint256 entry) internal {
         uint256 u = _units(long, notional, entry);
         if (long) {
+            longCount -= 1;
             longOI -= notional;
             longMargin -= margin;
             longUnits -= u;
         } else {
+            shortCount -= 1;
             shortOI -= notional;
             shortMargin -= margin;
             shortUnits -= u;

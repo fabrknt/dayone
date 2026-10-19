@@ -13,11 +13,15 @@ market's deployer while the book is thin, and retired once it is deep enough.
 - **Backed by the operator's seed, grown by losses.** The operator seeds the pool (`seed`, operator
   only, for shares at the pre-seed `shareValuation()`); traders' losses and fees add to it. A new
   position settles only if, after a `stressMoveBps` move either way (10% on testnet), the pool
-  could still pay every winner from its balance (`stressOwed`, the same conservative per-side
-  bound as `equity()`), and nothing opens while any winner is queued. So the future losers
-  paying today's winners is limited to moves past the stress size, and opens stop the moment it
-  happens. The bound counts each side's margin, so a seed backs about seed / (stress +
-  1 / leverage) of one-sided notional: $10,000 backs about $67,000 at 20x and $9,000 at 1x.
+  could still pay every winner from its balance, and nothing opens while any winner is queued.
+  The bound (`profitBound`) never lets a loser offset a winner: every long counts as entered at
+  the lowest open long entry, every short at the highest short entry (exact after an open; after
+  a close it stays put until anyone calls `refreshEntryBounds`). So the future losers paying
+  today's winners is limited to moves past the stress size, and opens stop the moment it
+  happens. With entries near the current price a seed backs about seed / stress of one-sided
+  notional ($10,000 backs about $100,000 at 10%); old entries far from the price use up more.
+  The stress move is at least `MIN_STRESS_BPS` (5%); 0 turns it off only on a local chain.
+  `equity()` subtracts the larger of this bound and its own, so redemption is covered too.
   Profits the pool cannot pay yet wait in a FIFO queue, paid from later losses or a new seed. Paying the queue costs the
   same gas however long it is: income moves a cumulative counter, and `claim(id)` (anyone may
   call it; the keeper does) sends each winner what the queue has paid them.
@@ -55,7 +59,7 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (21.2 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (21.9 KB runtime, under the 24 KB limit).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 
@@ -121,4 +125,4 @@ Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 cl
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; a claim button in the
 web UI (the keeper sends claims; without it a winner calls `claim(id)` directly); audit; mainnet.
 
-`forge test` (56 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
+`forge test` (58 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`.
