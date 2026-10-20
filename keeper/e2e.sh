@@ -200,4 +200,14 @@ later 61
 cast send -q --rpc-url $RPC --private-key $K0 $POOL "applyEnd()"
 keeper
 check "short settled without a request" "$(owner 2)" 0x0000000000000000000000000000000000000000
+echo "12. a one-sided book after a halt is not a halt: the keeper clears the frozen clock (Codex round 13b)"
+px 350000
+forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
+POOL=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['pool'])")
+halt 343000
+later 3; keeper
+check "frozen price noted" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256)" | cut -d' ' -f1)" 343000000000000000000
+cast send -q --rpc-url $RPC --private-key $K0 0x000000000000000000000000000000000000080e "set(uint32,bytes)" 110001 $(cast abi-encode "f(uint64,uint64)" 0 343005)
+later 3; keeper
+check "cleared on a one-sided book" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256)" | cut -d' ' -f1)" 0
 echo "all ok"

@@ -199,9 +199,22 @@ function byTicket(ids: bigint[]): bigint[] {
 let refreshedAt = -Infinity;
 let FROZEN_DELAY: bigint | undefined;
 let FROZEN_GAP: bigint | undefined; // the keeper notes every minute, inside this
+let sighting = false; // this tick's exits run on a frozen book
+let lastSightingMs = 0;
+
+/// While exits run on a frozen book, a long drain must not let the sighting go older than
+/// FROZEN_GAP: the pool would restart the hour. Notes again each minute of wall time; false
+/// (skip the exit) when that note fails.
+async function keepSighting(): Promise<boolean> {
+  if (!sighting || Date.now() - lastSightingMs < 60_000) return true;
+  if (!(await send("noteFrozen"))) return false;
+  lastSightingMs = Date.now();
+  return true;
+}
 
 async function tick() {
   tickNo++;
+  sighting = false;
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, bbo: dex === 0 ? index : 100000 + dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
@@ -236,8 +249,10 @@ async function tick() {
       // the note this tick restarts the clock when the price moved or the last sighting is too old
       const restarts = frozenPx !== oracle || now > seenAt + FROZEN_GAP!;
       const noted = restarts || now >= seenAt + 60n ? await send("noteFrozen") : true;
+      if (restarts || now >= seenAt + 60n) lastSightingMs = Date.now();
       exitsHeld = restarts || !noted || now < frozenAt + FROZEN_DELAY!;
-    } else if (!emptyBook && frozenPx !== 0n) await send("noteFrozen"); // the book is back: clear the clock
+      sighting = halted && !exitsHeld;
+    } else if (frozenPx !== 0n) await send("noteFrozen"); // any other book, live or not: clear the clock
   }
   // only pending and open positions: closed and cancelled ids leave this list on chain
   const ids = poolResult("activeIds", rawIds) as bigint[];
@@ -292,8 +307,8 @@ async function tick() {
   byTicket(opens);
   // the order matters when the RPC budget is tight: what protects the pool first
   let roomMade = false;
-  for (const id of liquidations) if (await send("liquidate", [id])) roomMade = true;
-  for (const id of closes) if (await send("settle", [id])) roomMade = true;
+  for (const id of liquidations) if ((await keepSighting()) && (await send("liquidate", [id]))) roomMade = true;
+  for (const id of closes) if ((await keepSighting()) && (await send("settle", [id]))) roomMade = true;
   if (roomMade) {
     for (const r of openRetry.values()) r.at = 0;
     // opens skipped this tick for their backoff are due now too
