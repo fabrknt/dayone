@@ -1289,4 +1289,62 @@ contract LaunchPoolTest is Test {
         assertEq(usdc.balanceOf(bob) - before, 807.5e6);
         assertEq(pool.claimable(0), 707.5e6); // still there if alice is unblocked
     }
+
+    // ---- Papertrade's "paper-mint straddle" (their 10-20 notes), replayed on Day One ----
+
+    /// One trader holds both sides of a straddle. After a big move it books the win first, so
+    /// the queue takes most of the pool, then the losing side, whose rebate is priced while the
+    /// pool is worth almost nothing: it can end up holding most of the shares. Priced at
+    /// shareValuation(), they are still worth no more than the rebate once the operator seeds
+    /// again. Papertrade minted a flat 100 PAPER per $1 there; returns the attacker's share of
+    /// the pool, what its shares are worth after the reseed, and the rebate.
+    function _straddle(bool winFirst, uint256 endPx) internal returns (uint256 attackerBps, uint256 worth, uint256 rebate) {
+        LaunchPool p = _backedPool();
+        p.seed(10_000 * USDC);
+        uint256 l = _requestAndWait(p, alice, true, 4_500 * USDC, 20); // $90K each side
+        p.settle(l);
+        uint256 s = _requestAndWait(p, bob, false, 4_500 * USDC, 20);
+        p.settle(s);
+        for (uint256 px = 350_000; px < endPx;) { // latch-sized steps
+            px = px + 7_000 < endPx ? px + 7_000 : endPx;
+            setPx(uint64(px));
+            p.poke();
+        }
+        if (!winFirst) p.liquidate(s);
+        vm.prank(alice);
+        p.requestClose(l);
+        vm.warp(block.timestamp + 3);
+        p.settle(l);
+        if (winFirst) p.liquidate(s);
+        rebate = 4_500 * USDC * 1200 / 10_000;
+        attackerBps = p.shares(bob) * 10_000 / p.totalShares();
+        p.seed(p.totalDebt() + 10_000 * USDC); // pays any queue first
+        worth = p.shares(bob) * p.equity(endPx * 1e15) / p.totalShares();
+    }
+
+    function test_straddleRebateWorthOnlyTheRebate() public {
+        for (uint256 endPx = 392_000; endPx <= 420_000; endPx += 7_000) {
+            uint256 snap = vm.snapshotState();
+            (uint256 bpsN, uint256 worthN, uint256 rebate) = _straddle(false, endPx);
+            vm.revertToState(snap);
+            (uint256 bpsA, uint256 worthA,) = _straddle(true, endPx);
+            vm.revertToState(snap);
+            emit log_named_uint("end price (1/1000 USD)", endPx);
+            emit log_named_uint("  loss first: attacker bps of pool", bpsN);
+            emit log_named_uint("  win first:  attacker bps of pool", bpsA);
+            emit log_named_uint("  loss first: worth after reseed", worthN);
+            emit log_named_uint("  win first:  worth after reseed", worthA);
+            assertLe(worthN, rebate);
+            assertLe(worthA, rebate);
+        }
+    }
+
+    /// Every end price, including the ones that leave the pool worth just above the rebate,
+    /// where the attacker holds nearly every share.
+    function testFuzz_straddleRebateWorthOnlyTheRebate(uint256 endPx) public {
+        endPx = bound(endPx, 368_000, 430_000); // the short past its whole margin
+        (uint256 bps, uint256 worth, uint256 rebate) = _straddle(true, endPx);
+        assertLe(worth, rebate);
+        if (bps > 9_900) emit log_named_uint("attacker held bps", bps);
+    }
 }
