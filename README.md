@@ -38,7 +38,11 @@ market's deployer while the book is thin, and retired once it is deep enough.
   positions and requests can bring in (each loses at most its margin). Redemption pays out of
   `equity()`, which reserves, per side, that side's PnL plus its margin, so open losses never
   offset open winners. The first mint locks the rest of the
-  valuation in shares the contract holds, so no early holder owns the pool.
+  valuation in shares the contract holds, so no early holder owns the pool. Papertrade's
+  "paper-mint straddle" (close only the winning side to push the pool insolvent, then mint at a flat
+  rate on the losing side) replayed here: booking the win first can hand the loser up to 99% of the
+  shares, but priced net of the queue they stay worth only the rebate once the operator seeds again
+  (`test_straddleRebateWorthOnlyTheRebate`, fuzzed over the end price).
 - **Settlement.** Two-step: request, then anyone settles after `settleDelay` at HL's oracle read
   through hl-price-guard's `HLPriceGuard` (bounds, an independent reference, a jump latch). Any
   breach makes settlement and liquidation wait. Liquidation stays behind the guard on purpose:
@@ -77,11 +81,13 @@ When to retire the pool (graduation criteria, a deadline, stop conditions, what 
 undecided with the operator): `docs/graduation.md` (Japanese, a draft until an operator signs on).
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (55 tests, including regressions for review
-  findings: `test_r1_*` to `test_r12_*`), `test/Invariant.t.sol` (5 invariants over random sequences
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (65 tests, including regressions for review
+  findings: `test_r1_*` to `test_r12_*`, and for round 13 `test_frozenClockRestartsAfterAGapInSightings`;
+  the halted-market tests are `test_halted*`, `test_frozen*` and `test_operatorEnd*`), `test/Invariant.t.sol` (5 invariants over random sequences
   of every action, parameter changes, latch trips, rearms and seeds; after each step: tokens == books, the debt queue's
   counters and order, per-side totals == positions, shares add up, equity <= shareValuation).
-  `forge coverage --ir-minimum` on `LaunchPool.sol` (10-20): lines 98.9%, branches 91.8%.
+  `forge coverage --ir-minimum` on `LaunchPool.sol` (10-21): lines 98.5%, branches 89.9% (91.8% on 10-20,
+  before the halted-market branches).
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
@@ -99,9 +105,17 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   (`keeper/campana.mjs` for NYSE, 2026 and 2027; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
   outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
+  On an empty book (what the guard refuses: no oracle, no bid, or ask at or under bid) it sends nothing
+  that would revert; on a halted one, (0, 0), it calls `noteFrozen()` once a minute, and again during a long
+  run of exits so the sighting never goes older than `FROZEN_GAP`, settles exits once the frozen hour is
+  up, and clears the clock as soon as the book is anything else. Once the pool is ended it settles every
+  open position at the end price.
   `POOL_ABI=v1` for a pool deployed before the pauser role, `claim()` and the backing check
-  (testnet 0x183A…), set explicitly rather than guessed from a failed call.
-  `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses.
+  (testnet 0x183A…), `POOL_ABI=v2` for one deployed after them but before the halted-market exits,
+  set explicitly rather than guessed from a failed call.
+  `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses,
+  including a halt (the hour held, then settled at the frozen oracle), an operator end, a `POOL_ABI=v2`
+  tick and a one-sided book clearing the clock.
   `deploy/cohost/` runs it as a systemd service on an existing Linux host.
 
 ## Web UI
@@ -151,6 +165,10 @@ close positions left open after graduation (`docs/graduation.md`, to settle with
 whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
 exact instead of assumed, at the cost of capped wins (as hyperevm-perp and hyperevm-knockout do);
 the independent reference (`maxRefOracleBps` is 0 on testnet; `PythRef` needs Hermes update data,
-which has required an API key since 2026-08-26).
+which has required an API key since 2026-08-26); the halted-market exits on the page (it does not yet
+show a frozen clock, a proposed end or an ended pool) and in `test/Invariant.t.sol` (its random
+sequences do not halt the book yet); on a market with no reference, a live book shorter than
+`FROZEN_GAP` between two keeper sightings that comes back to exactly the same oracle goes unseen, so
+watch that the keeper is alive.
 
-`forge test` (60 tests); `npm install && ./keeper/e2e.sh` (23 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+`forge test` (70 tests); `npm install && ./keeper/e2e.sh` (32 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
