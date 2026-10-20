@@ -48,6 +48,15 @@ market's deployer while the book is thin, and retired once it is deep enough.
   oracle and the pushable mark liquidate traders at a false price
   (`test_liquidationWaitingOnLatchOwesNothing`). Funding, if added, must accrue by time, not per
   call.
+- **A halted or delisted market.** Its book reads (0, 0) and the guard refuses every read, which
+  would hold every position forever (para:PAPER was halted and settled on 2026-10-20; on mainnet
+  its oracle and mark then sat at the settle price with an empty book). Two ways out. Once
+  `noteFrozen()` has seen the book empty and the oracle unchanged for `FROZEN_DELAY` (1 hour),
+  closes, liquidations and redemptions settle at that oracle, still checked against the
+  reference and the jump latch, until the book returns; opens stay refused. And the operator
+  can `proposeEnd(price)`: opens stop at once, and `paramsDelay` later `applyEnd()` (anyone, only
+  while the book is still empty and the reference agrees) ends the pool, after which anyone
+  settles every open position at that price.
 - **Caps.** Opens and closes each have a rolling notional cap (`ExposureBudget.Rolling`), so opens
   cannot use up the budget due closes need; net open interest is capped too. On replay of
   Papertrade's 10-10 incident, the per-minute cap is what made the push unprofitable; choosing the
@@ -55,11 +64,11 @@ market's deployer while the book is thin, and retired once it is deep enough.
 - **Operator limits.** Parameter, bounds and reference changes take effect `paramsDelay` after
   they are proposed; raising the cap or changing its window also needs opens paused. Each
   position keeps the fee, haircut and maintenance it was opened with. `rearm` (after a real gap
-  trips the latch), pausing opens and `graduate()` are immediate. The keeper holds a separate
+  trips the latch), pausing opens and `graduate()` are immediate; ending the pool waits `paramsDelay`. The keeper holds a separate
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (22.0 KB runtime, under the 24 KB limit).
+  guard, and the optimizer on (23.3 KB runtime, under the 24 KB limit: 737 bytes left).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 When to retire the pool (graduation criteria, a deadline, stop conditions, what stays

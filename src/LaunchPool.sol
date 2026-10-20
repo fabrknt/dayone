@@ -31,6 +31,12 @@ interface IRefSource {
 /// - Any guard breach (bounds, reference, jump latch) makes settlement revert; requests wait.
 /// - Parameter changes take effect `paramsDelay` after they are proposed, and positions keep
 ///   the fee and haircut they were opened with.
+/// - When the HIP-3 market is halted or delisted its book is empty, so the guard refuses every
+///   read. Two ways out (Papertrade's para:PAPER was halted and settled on 2026-10-20 this way):
+///   once noteFrozen() has seen the book empty and the oracle unchanged for FROZEN_DELAY,
+///   closes, liquidations and redemptions settle at that oracle (until the book returns); and
+///   the operator can end the pool at a price, `paramsDelay` after proposing it, while the book
+///   is still empty.
 contract LaunchPool {
     using ExposureBudget for ExposureBudget.Rolling;
     using HLPriceGuard for HLPriceGuard.JumpLatch;
@@ -47,6 +53,10 @@ contract LaunchPool {
     /// and block a close or liquidation, and the rebate keeps being paid in shares.
     uint256 public constant MAX_SHARES = 2 ** 128;
     uint256 public constant REBASE = 2 ** 64;
+    /// How long the book must stay empty with the oracle unchanged before exits may settle at
+    /// that oracle. Hyperliquid settles delisted perps on a one-hour average; a live market's
+    /// oracle moves every few seconds.
+    uint64 public constant FROZEN_DELAY = 1 hours;
 
     struct Params {
         uint16 maxLeverage;
@@ -118,6 +128,12 @@ contract LaunchPool {
     bool public hoursPaused; // out of trading hours: set and cleared by the pauser or the operator
     bool public graduated; // book is deep enough: no new opens, closes still settle
 
+    uint256 public frozenPx; // the oracle while the book was seen empty; 0 = not frozen
+    uint64 public frozenAt; // when the book was first seen empty at frozenPx
+    uint256 public endPrice; // proposed, then final: every position settles here once ended
+    uint64 public endAt; // when the proposed end may be applied; 0 = none proposed
+    bool public ended;
+
     uint256 public poolBalance; // collateral the pool can pay out from
     uint256 public totalShares;
     mapping(address => uint256) internal _shares; // _shares[address(this)] = locked, never redeemable
@@ -170,6 +186,9 @@ contract LaunchPool {
     event ParamsApplied();
     event PauserSet(address pauser);
     event Claimed(uint256 indexed id, address indexed to, uint256 amount);
+    event Frozen(uint256 price, uint64 at);
+    event EndProposed(uint256 price, uint64 effectiveAt);
+    event Ended(uint256 price);
 
     error NotOperator();
     error NotPauser();
@@ -221,9 +240,10 @@ contract LaunchPool {
 
     // ---- views ----
 
-    /// New opens are refused while either the operator or trading hours hold them.
+    /// New opens are refused while either the operator or trading hours hold them, and from the
+    /// moment an end is proposed.
     function opensPaused() public view returns (bool) {
-        return operatorPaused || hoursPaused;
+        return operatorPaused || hoursPaused || endAt != 0 || ended;
     }
 
     function getParams() external view returns (Params memory) {
@@ -342,6 +362,28 @@ contract LaunchPool {
         emit ParamsApplied();
     }
 
+    /// End the pool at `price`, `paramsDelay` from now via applyEnd(), for a market that has been
+    /// halted or delisted. Opens stop at once. 0 withdraws the proposal.
+    function proposeEnd(uint256 price) external onlyOperator {
+        // the same range an oracle read can have, so the PnL products cannot overflow
+        if (ended || price > uint256(type(uint64).max) * 10 ** (12 + uint256(asset.szDecimals))) revert BadRequest();
+        endPrice = price;
+        endAt = price == 0 ? 0 : uint64(block.timestamp) + paramsDelay;
+        emit EndProposed(price, endAt);
+    }
+
+    /// Anyone, once the delay has passed, and only while the book is still empty (a live market
+    /// cannot be ended) and the reference, if any, agrees with the price.
+    function applyEnd() external {
+        if (endAt == 0 || block.timestamp < endAt) revert TooEarly();
+        HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
+        if (q.bid != 0 || q.ask != 0) revert BadRequest();
+        _checkRef(endPrice);
+        ended = true;
+        endAt = 0;
+        emit Ended(endPrice);
+    }
+
     /// After a real gap trips the jump latch. Only once an independent reference agrees.
     /// Immediate (an emergency lever); the operator already controls this market's oracle.
     function rearm(uint256 price) external onlyOperator {
@@ -403,12 +445,13 @@ contract LaunchPool {
     /// Anyone (usually a keeper) settles a pending open or close at the guarded oracle.
     function settle(uint256 id) external nonReentrant {
         Position storage p = positions[id];
-        if (p.owner == address(0) || (p.entry != 0 && !p.closing)) revert BadRequest();
+        // once ended, anyone settles any open position: its owner may never come back
+        if (p.owner == address(0) || (p.entry != 0 && !p.closing && !ended)) revert BadRequest();
         if (block.timestamp < p.requestedAt + _params.settleDelay) revert TooEarly();
         uint256 notional = p.margin * p.leverage;
-        uint256 price = _price();
         if (p.entry == 0) {
             if (opensPaused() || graduated) revert OpensClosed();
+            uint256 price = _price();
             _openLane.spend(notional, _params.capPerWindow, _params.capWindow);
             _addOI(p.long, notional, p.margin, price);
             uint256 net = _net();
@@ -419,7 +462,8 @@ contract LaunchPool {
             _checkBacking(price);
             emit Opened(id, price);
         } else {
-            _closeLane.spend(notional, _params.capPerWindow, _params.capWindow);
+            uint256 price = _exitPrice();
+            if (!ended) _closeLane.spend(notional, _params.capPerWindow, _params.capWindow);
             _close(id, p, price);
         }
     }
@@ -427,7 +471,7 @@ contract LaunchPool {
     function liquidate(uint256 id) external nonReentrant {
         Position memory p = positions[id];
         if (p.entry == 0) revert BadRequest();
-        uint256 price = _price();
+        uint256 price = _exitPrice();
         uint256 notional = p.margin * p.leverage;
         int256 posEquity = int256(p.margin) + _pnl(p, price);
         if (posEquity >= int256(_bpsUp(notional, p.maintenanceBps))) revert NotLiquidatable();
@@ -445,6 +489,22 @@ contract LaunchPool {
     /// that succeeds, so without it a quiet spell plus normal drift would trip the latch.
     function poke() external returns (uint256) {
         return _price();
+    }
+
+    /// Keepers call this while the book is empty (poke() reverts then). Starts the clock at the
+    /// current oracle, restarts it when the oracle moves, and clears it once the book is back.
+    function noteFrozen() external {
+        HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
+        if (q.bid == 0 && q.ask == 0 && q.oracle != 0) {
+            if (q.oracle != frozenPx) {
+                frozenPx = q.oracle;
+                frozenAt = uint64(block.timestamp);
+                emit Frozen(q.oracle, frozenAt);
+            }
+        } else if (frozenPx != 0) {
+            frozenPx = 0;
+            frozenAt = 0;
+        }
     }
 
     /// Send queued winner `id` what the queue has paid them so far. Anyone may call; the
@@ -466,7 +526,7 @@ contract LaunchPool {
     /// winners are queued, and limited to equity above minReserve plus a buffer on net OI.
     function redeem(uint256 amountShares) external nonReentrant returns (uint256 amount) {
         if (totalDebt != 0 || amountShares == 0 || amountShares > _syncShares(msg.sender)) revert BadRequest();
-        uint256 eq = equity(_price());
+        uint256 eq = equity(_exitPrice());
         amount = amountShares * eq / totalShares;
         uint256 hold = minReserve + _net() * _params.redeemBufferBps / 10_000;
         uint256 available = eq > hold ? eq - hold : 0;
@@ -581,7 +641,44 @@ contract LaunchPool {
             (reason, observed, limit) = latch.observe(q.oracle, _params.maxJumpBps);
         }
         if (reason != HLPriceGuard.Breach.None) revert Breach(reason, observed, limit);
+        if (frozenPx != 0) {
+            // a good read means the book is back: the frozen clock starts over
+            frozenPx = 0;
+            frozenAt = 0;
+        }
         return q.oracle;
+    }
+
+    /// The price for closes, liquidations and redemptions: the end price once ended; the frozen
+    /// oracle while the book has stayed empty and the oracle unchanged for FROZEN_DELAY (still
+    /// checked against the reference and the jump latch); otherwise the guarded oracle.
+    function _exitPrice() internal returns (uint256) {
+        if (ended) return endPrice;
+        HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
+        if (
+            q.bid == 0 && q.ask == 0 && frozenPx != 0 && q.oracle == frozenPx
+                && block.timestamp >= frozenAt + FROZEN_DELAY
+        ) {
+            _checkRef(q.oracle);
+            (HLPriceGuard.Breach reason, uint256 observed, uint256 limit) = latch.observe(q.oracle, _params.maxJumpBps);
+            if (reason != HLPriceGuard.Breach.None) revert Breach(reason, observed, limit);
+            return q.oracle;
+        }
+        return _price();
+    }
+
+    /// The reference half of the guard, for prices read without a book.
+    function _checkRef(uint256 price) internal view {
+        if (address(refSource) == address(0)) return;
+        HLPriceGuard.Ref memory r = refSource.ref();
+        if (r.price == 0) return;
+        if (block.timestamp > r.updatedAt + r.maxAge) {
+            revert Breach(HLPriceGuard.Breach.RefStale, block.timestamp - r.updatedAt, r.maxAge);
+        }
+        uint256 v = HLPriceGuard.diffBps(price, r.price);
+        if (bounds.maxRefOracleBps != 0 && v > bounds.maxRefOracleBps) {
+            revert Breach(HLPriceGuard.Breach.RefOracle, v, bounds.maxRefOracleBps);
+        }
     }
 
     function _remove(uint256 id) internal {

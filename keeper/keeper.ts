@@ -17,6 +17,10 @@
 //      winners what the queue has paid them.
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
+// A halted or delisted market reads as an empty book (0, 0): the keeper calls noteFrozen() when
+// the oracle differs from the one the pool noted, and holds liquidations and closes until
+// FROZEN_DELAY has passed at that price. Once the operator's end is applied it settles every
+// open position at the end price.
 import { readFileSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import {
@@ -29,6 +33,7 @@ import { marketStatus as nyseStatus, CALENDAR_2026, CALENDAR_2027 } from "./camp
 import { marketStatus as krxStatus } from "./krx.mjs";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
+const BBO: Address = "0x000000000000000000000000000000000000080e";
 // Public RPCs rate-limit per request, so each tick reads everything through Multicall3 (deployed
 // at the usual address on HyperEVM mainnet and testnet): one call for the oracle, block time,
 // active ids and pause flag, and one more for the positions when there are any.
@@ -146,7 +151,7 @@ const poolResult = (functionName: string, data: Hex) =>
 // keep the anchor close (settle and liquidate move it too), without a transaction per update
 const POKE_AT = Number(process.env.POKE_AT_FRACTION ?? 0.25);
 if (!(POKE_AT > 0 && POKE_AT < 1)) throw new Error(`POKE_AT_FRACTION must be in (0, 1), got ${process.env.POKE_AT_FRACTION}`);
-let asset: { perp: number; scale: bigint } | undefined; // fixed at deployment
+let asset: { perp: number; bbo: number; scale: bigint } | undefined; // fixed at deployment
 // POOL_ABI=v1 for pools deployed before the pauser role and claim() (testnet 0x183A…): the
 // trading-hours pause is setOpensPaused with the operator key, and settle pays queued winners
 // itself. Set explicitly, never guessed from a failed call: an RPC that answers "0x" looks just
@@ -188,25 +193,40 @@ function byTicket(ids: bigint[]): bigint[] {
   return ids.sort((a, b) => ticket.get(a)! - ticket.get(b)!);
 }
 let refreshedAt = -Infinity;
+let FROZEN_DELAY: bigint | undefined;
 
 async function tick() {
   tickNo++;
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
-    asset = { perp: dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
+    asset = { perp: dex * 10000 + index, bbo: dex === 0 ? index : 100000 + dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
   }
-  const [rawPx, rawNow, rawIds, rawPaused, rawParams, rawLatch, rawUnclaimed] = await batch([
+  const [rawPx, rawBbo, rawNow, rawIds, rawPaused, rawParams, rawLatch, rawUnclaimed, rawEnded, rawFrozenPx, rawFrozenAt] = await batch([
     { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
+    { target: BBO, data: encodeAbiParameters([{ type: "uint32" }], [asset.bbo]) },
     { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
     poolCall("activeIds"),
     poolCall(pauseFns.read), // with a pauser role, the operator's own pause is separate and the keeper never clears it
     poolCall("getParams"), // every tick: a delay cut by applyParams must take effect at once
     poolCall("latch"),
     ...(claims ? [poolCall("unclaimed")] : []),
+    ...(v1 ? [] : [poolCall("ended"), poolCall("frozenPx"), poolCall("frozenAt")]),
   ]);
   const [px] = decodeAbiParameters([{ type: "uint64" }], rawPx);
   const oracle = (px as bigint) * asset.scale;
   const now = decodeFunctionResult({ abi: mcAbi, functionName: "getCurrentBlockTimestamp", data: rawNow });
+  const [bid, ask] = decodeAbiParameters([{ type: "uint64" }, { type: "uint64" }], rawBbo);
+  const emptyBook = bid === 0n && ask === 0n;
+  const ended = !v1 && (poolResult("ended", rawEnded) as boolean);
+  let exitsHeld = false; // empty book, not yet frozen long enough: exits would revert
+  if (!v1 && emptyBook && !ended) {
+    const frozenPx = poolResult("frozenPx", rawFrozenPx) as bigint;
+    const frozenAt = poolResult("frozenAt", rawFrozenAt) as bigint;
+    if (frozenPx !== oracle) {
+      await send("noteFrozen");
+      exitsHeld = true;
+    } else exitsHeld = now < frozenAt + (FROZEN_DELAY ??= await read("FROZEN_DELAY"));
+  }
   // only pending and open positions: closed and cancelled ids leave this list on chain
   const ids = poolResult("activeIds", rawIds) as bigint[];
 
@@ -236,6 +256,12 @@ async function tick() {
     // maintenance is the one stored with the position when it was opened, as the contract uses
     const [owner, long, leverage, margin, entry, requestedAt, closing, , , maintenanceBps] = poolResult("positions", rows[i]);
     if (owner === "0x0000000000000000000000000000000000000000") continue;
+    if (ended) {
+      // every open position settles at the end price; pending opens can only be cancelled
+      if (entry !== 0n && now >= requestedAt + settleDelay) closes.push(id);
+      continue;
+    }
+    if (exitsHeld) continue;
     if ((entry === 0n || closing) && now >= requestedAt + settleDelay) {
       if (closing) closes.push(id);
       else if ((openRetry.get(id)?.at ?? 0) <= tickNo) opens.push(id);
@@ -265,7 +291,7 @@ async function tick() {
     }
     byTicket(opens);
   }
-  for (const id of opens.slice(0, OPENS_PER_TICK)) {
+  for (const id of emptyBook ? [] : opens.slice(0, OPENS_PER_TICK)) {
     ticket.set(id, nextTicket++);
     if (await send("settle", [id])) {
       openRetry.delete(id);
@@ -284,7 +310,7 @@ async function tick() {
   const settlements = [...closes, ...opens];
   let claimed = 0;
   if (rawUnclaimed && poolResult("unclaimed", rawUnclaimed) > 0n) claimed = await sendClaims();
-  if (moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length + claimed === 0) await send("poke");
+  if (!emptyBook && moved >= Number(p.maxJumpBps) * POKE_AT && liquidations.length + settlements.length + claimed === 0) await send("poke");
 }
 
 /// Sends up to CLAIMS_PER_TICK winners their paid part. Each tick reads up to CLAIM_SCAN debts,

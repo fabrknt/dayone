@@ -885,6 +885,13 @@ contract LaunchPoolTest is Test {
 
     /// Codex round 10: the arithmetic limits. Prices beyond HL's scale are refused at deploy;
     /// fees round up; a mint that would overflow the share count rebases every holding first.
+    /// The storage slot holding `v` (here totalShares), found rather than hard-coded, so adding
+    /// state does not silently point the test at another variable.
+    function _slotOf(uint256 v) internal view returns (uint256 slot) {
+        for (; slot < 64; slot++) if (uint256(vm.load(address(pool), bytes32(slot))) == v) return slot;
+        revert("slot not found");
+    }
+
     function test_r10_arithmeticLimits() public {
         HLPriceGuard.Bounds memory b = HLPriceGuard.Bounds(25, 25, 20, 150);
         vm.expectRevert(LaunchPool.BadParams.selector);
@@ -901,7 +908,7 @@ contract LaunchPoolTest is Test {
         setPx(349_000);
         close(alice, id); // a small loss: the first mint
         assertGt(pool.totalShares(), 0);
-        vm.store(address(pool), bytes32(uint256(22)), bytes32(pool.MAX_SHARES() - 1)); // totalShares
+        vm.store(address(pool), bytes32(_slotOf(pool.totalShares())), bytes32(pool.MAX_SHARES() - 1));
         id = open(bob, true, 1_000 * USDC, 10);
         setPx(344_750);
         pool.poke();
@@ -1346,5 +1353,186 @@ contract LaunchPoolTest is Test {
         (uint256 bps, uint256 worth, uint256 rebate) = _straddle(true, endPx);
         assertLe(worth, rebate);
         if (bps > 9_900) emit log_named_uint("attacker held bps", bps);
+    }
+
+    // ---- the market is halted or delisted (para:PAPER, 2026-10-20) ----
+
+    /// As read on mainnet after the halt: the book (0, 0), oracle and mark at the settle price.
+    function haltAt(uint64 px) internal {
+        MockPrecompile(HLPrecompiles.ORACLE_PX).set(PERP, abi.encode(px));
+        MockPrecompile(HLPrecompiles.MARK_PX).set(PERP, abi.encode(px));
+        MockPrecompile(HLPrecompiles.BBO).set(BBO_IDX, abi.encode(uint64(0), uint64(0)));
+    }
+
+    function test_haltedMarketBlocksEverythingWithoutAnExit() public {
+        uint256 id = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(id);
+        haltAt(343_000);
+        vm.warp(block.timestamp + 3);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.EmptyBook, 0, 0));
+        pool.settle(id);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.EmptyBook, 0, 0));
+        pool.liquidate(id);
+    }
+
+    function test_frozenExitAfterTheDelay() public {
+        uint256 l = open(alice, true, 1_000 * USDC, 10);
+        uint256 s = open(bob, false, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(l);
+        haltAt(343_000); // -2%, within the latch
+        pool.noteFrozen();
+        assertEq(pool.frozenPx(), 343e18);
+        vm.warp(block.timestamp + pool.FROZEN_DELAY() - 1);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l);
+        vm.warp(block.timestamp + 1);
+        pool.settle(l); // the long closes at the frozen oracle: -2% of $10K
+        assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 200 * USDC - 10 * USDC); // loss + both fees
+        // no opens while frozen, and the open side still needs its owner's request
+        vm.prank(bob);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.settle(s);
+        vm.prank(alice);
+        uint256 o = pool.requestOpen(true, 1_000 * USDC, 10);
+        vm.warp(block.timestamp + 3);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(o);
+    }
+
+    function test_frozenClockRestartsWhenTheOracleMovesOrTheBookReturns() public {
+        uint256 l = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(l);
+        haltAt(343_000);
+        pool.noteFrozen();
+        vm.warp(block.timestamp + 50 minutes);
+        haltAt(343_100); // the oracle moved: not frozen at the old price
+        vm.warp(block.timestamp + 20 minutes);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l);
+        pool.noteFrozen();
+        assertEq(pool.frozenAt(), block.timestamp);
+        // the book comes back for a moment: the clock is cleared, by noteFrozen or by a good read
+        setPx(343_100);
+        pool.poke();
+        assertEq(pool.frozenPx(), 0);
+        haltAt(343_100);
+        vm.warp(block.timestamp + 2 hours);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l); // empty again, but nobody noted it
+        pool.noteFrozen();
+        vm.warp(block.timestamp + 1 hours);
+        pool.settle(l);
+    }
+
+    function test_frozenExitStillCheckedByReferenceAndLatch() public {
+        MockRef r = new MockRef();
+        r.set(350e18, block.timestamp, 1 days);
+        pool.proposeParams(defaultParams(), HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(r)));
+        vm.warp(block.timestamp + 1 days);
+        r.set(350e18, block.timestamp, 1 days);
+        pool.applyParams();
+        uint256 l = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(l);
+        haltAt(343_000); // 2% from the reference, which allows 1.5%
+        pool.noteFrozen();
+        vm.warp(block.timestamp + 1 hours);
+        r.set(350e18, block.timestamp, 1 days);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l);
+        r.set(344e18, block.timestamp, 1 days);
+        pool.settle(l);
+
+        // a settle price far from the latch's anchor waits for the operator's rearm
+        setPx(344_000);
+        uint256 l2 = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(l2);
+        haltAt(300_000);
+        r.set(300e18, block.timestamp, 1 days);
+        pool.noteFrozen();
+        vm.warp(block.timestamp + 1 hours);
+        r.set(300e18, block.timestamp, 1 days);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.Jump, 1280, 200));
+        pool.settle(l2);
+        pool.rearm(300e18);
+        pool.settle(l2);
+    }
+
+    function test_operatorEndSettlesEveryPosition() public {
+        uint256 l = open(alice, true, 1_000 * USDC, 10);
+        uint256 s = open(bob, false, 1_000 * USDC, 10);
+        vm.prank(alice);
+        uint256 pending = pool.requestOpen(true, 1_000 * USDC, 10);
+        vm.expectRevert(LaunchPool.NotOperator.selector);
+        vm.prank(alice);
+        pool.proposeEnd(330e18);
+        pool.proposeEnd(330e18); // e.g. Hyperliquid's settle price; it need not be the last oracle
+        assertTrue(pool.opensPaused());
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        vm.prank(bob);
+        pool.requestOpen(true, 1_000 * USDC, 10);
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(LaunchPool.BadRequest.selector); // the book is still live
+        pool.applyEnd();
+        haltAt(330_000);
+        pool.applyEnd();
+        assertTrue(pool.ended());
+        // anyone settles any open position, without a request and without a book
+        pool.settle(l); // long -5.71%
+        pool.settle(s); // short +5.71%
+        (address owner,,,,,,,,,,,) = pool.positions(l);
+        assertEq(owner, address(0));
+        (owner,,,,,,,,,,,) = pool.positions(s);
+        assertEq(owner, address(0));
+        assertGt(usdc.balanceOf(bob), 1_000_000 * USDC);
+        // the pending open can only be cancelled
+        vm.expectRevert(LaunchPool.OpensClosed.selector);
+        pool.settle(pending);
+        vm.prank(alice);
+        pool.cancelOpen(pending);
+        // holders redeem at the end price
+        uint256 sh = pool.shares(alice);
+        vm.prank(alice);
+        assertGt(pool.redeem(sh), 0);
+        vm.expectRevert(LaunchPool.BadRequest.selector);
+        pool.proposeEnd(1);
+    }
+
+    function test_operatorEndWaitsTheDelayAndCanBeWithdrawn() public {
+        open(alice, true, 1_000 * USDC, 10);
+        haltAt(330_000);
+        pool.proposeEnd(330e18);
+        vm.warp(block.timestamp + 1 days - 1);
+        vm.expectRevert(LaunchPool.TooEarly.selector);
+        pool.applyEnd();
+        pool.proposeEnd(0);
+        assertFalse(pool.opensPaused());
+        vm.warp(block.timestamp + 1);
+        vm.expectRevert(LaunchPool.TooEarly.selector);
+        pool.applyEnd();
+        vm.expectRevert(LaunchPool.BadRequest.selector); // beyond any oracle read
+        pool.proposeEnd(uint256(type(uint64).max) * 1e15 + 1);
+    }
+
+    function test_operatorEndCheckedByReference() public {
+        MockRef r = new MockRef();
+        r.set(350e18, block.timestamp, 1 days);
+        pool.proposeParams(defaultParams(), HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(r)));
+        vm.warp(block.timestamp + 1 days);
+        r.set(350e18, block.timestamp, 1 days);
+        pool.applyParams();
+        open(alice, true, 1_000 * USDC, 10);
+        haltAt(300_000);
+        pool.proposeEnd(300e18);
+        vm.warp(block.timestamp + 1 days);
+        r.set(350e18, block.timestamp, 1 days);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.applyEnd();
+        r.set(301e18, block.timestamp, 1 days);
+        pool.applyEnd();
     }
 }

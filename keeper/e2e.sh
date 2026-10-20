@@ -162,4 +162,32 @@ done
 grep -E "claim" $KLOG | sort | uniq -c | sed 's/^ */  /; s/ [0-9T:.-]*Z / keeper: /; s/ 0x[0-9a-f]*$//'
 check "next winner paid despite the blocked one ahead" "$(( $(cast call --rpc-url $RPC $USDC "balanceOf(address)(uint256)" $T1 | cut -d' ' -f1) - BEFORE ))" 807500000
 check "blocked winner's part still claimable" "$(cast call --rpc-url $RPC $POOL "claimable(uint256)(uint256)" 0 | cut -d' ' -f1)" 707500000
+echo "10. the market is halted (book 0/0, as para:PAPER read on mainnet): the keeper notes it, waits an hour, then settles the close"
+px 350000
+forge script script/DeployLocal.s.sol --rpc-url $RPC --private-key $K0 --broadcast --silent >/dev/null
+POOL=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['pool'])")
+USDC=$(python3 -c "import json;print(json.load(open('keeper/.local.json'))['usdc'])")
+cast send -q --rpc-url $RPC --private-key $K0 $USDC "mint(address,uint256)" $T1 1000000000000
+cast send -q --rpc-url $RPC --private-key $K1 $USDC "approve(address,uint256)" $POOL 1000000000000
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" true 10000000000 10
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" false 10000000000 10
+later 3; keeper
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestClose(uint256)" 1
+halt() {
+  cast send -q --rpc-url $RPC --private-key $K0 0x0000000000000000000000000000000000000807 "set(uint32,bytes)" 10001 $(cast abi-encode "f(uint64)" $1)
+  cast send -q --rpc-url $RPC --private-key $K0 0x0000000000000000000000000000000000000806 "set(uint32,bytes)" 10001 $(cast abi-encode "f(uint64)" $1)
+  cast send -q --rpc-url $RPC --private-key $K0 0x000000000000000000000000000000000000080e "set(uint32,bytes)" 110001 $(cast abi-encode "f(uint64,uint64)" 0 0)
+}
+halt 343000
+later 3; keeper
+check "frozen price noted" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256)" | cut -d' ' -f1)" 343000000000000000000
+check "close held during the hour" "$(entry 1)" 350000000000000000000
+later 3600; keeper
+check "close settled at the frozen oracle" "$(owner 1)" 0x0000000000000000000000000000000000000000
+echo "11. the operator ends the pool at the settle price: after paramsDelay the keeper settles the rest"
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "proposeEnd(uint256)" 343000000000000000000
+later 61
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "applyEnd()"
+keeper
+check "short settled without a request" "$(owner 2)" 0x0000000000000000000000000000000000000000
 echo "all ok"
