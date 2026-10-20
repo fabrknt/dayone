@@ -182,10 +182,20 @@ halt 343000
 later 3; keeper
 check "frozen price noted" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256)" | cut -d' ' -f1)" 343000000000000000000
 check "close held during the hour" "$(entry 1)" 350000000000000000000
-later 3600; keeper
+# chain time also runs with the wall clock while the keeper starts, so compare chain times
+for i in $(seq 1 50); do later 60; keeper >/dev/null; done
+check "close still held after 50 minutes of sightings" "$(entry 1)" 350000000000000000000
+for i in $(seq 1 15); do later 60; keeper >/dev/null; [ "$(owner 1)" = 0x0000000000000000000000000000000000000000 ] && break; done
 check "close settled at the frozen oracle" "$(owner 1)" 0x0000000000000000000000000000000000000000
+FROZEN_AT=$(cast call --rpc-url $RPC $POOL "frozenAt()(uint64)" | cut -d" " -f1)
+SETTLED_AT=$(cast block --rpc-url $RPC latest -f timestamp)
+check "no earlier than an hour after the first sighting" "$(( SETTLED_AT - FROZEN_AT >= 3600 ))" 1
 echo "11. the operator ends the pool at the settle price: after paramsDelay the keeper settles the rest"
 cast send -q --rpc-url $RPC --private-key $K0 $POOL "proposeEnd(uint256)" 343000000000000000000
+echo "    (the keeper on a pool without the exits holds its sends on the empty book: POOL_ABI=v2)"
+LOG=$(mktemp)
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 POOL_ABI=v2 node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
+! grep -qE "tick failed|noteFrozen|settle|liquidate|poke" $LOG && echo "ok   v2 keeper ticks and sends nothing" || { cat $LOG; echo "FAIL v2 keeper"; exit 1; }
 later 61
 cast send -q --rpc-url $RPC --private-key $K0 $POOL "applyEnd()"
 keeper

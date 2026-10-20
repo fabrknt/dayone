@@ -17,10 +17,10 @@
 //      winners what the queue has paid them.
 // A guard breach makes poke/settle/liquidate revert; the keeper logs it and tries again next
 // tick. It never tries to get around a breach: waiting is the intended behaviour.
-// A halted or delisted market reads as an empty book (0, 0): the keeper calls noteFrozen() when
-// the oracle differs from the one the pool noted, and holds liquidations and closes until
-// FROZEN_DELAY has passed at that price. Once the operator's end is applied it settles every
-// open position at the end price.
+// A halted or delisted market reads as an empty book (0, 0): the keeper calls noteFrozen() every
+// minute (the pool restarts the clock after a gap over FROZEN_GAP), and holds liquidations,
+// closes, opens and pokes while the guard would refuse the book, until FROZEN_DELAY has passed
+// at one price. Once the operator's end is applied it settles every open position at the end price.
 import { readFileSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import {
@@ -156,8 +156,12 @@ let asset: { perp: number; bbo: number; scale: bigint } | undefined; // fixed at
 // trading-hours pause is setOpensPaused with the operator key, and settle pays queued winners
 // itself. Set explicitly, never guessed from a failed call: an RPC that answers "0x" looks just
 // like an old pool, and a wrong guess would stick for the life of the process.
+// POOL_ABI=v2 for pools deployed after claim() but before the halted-market exits (no
+// noteFrozen(), ended()): the keeper then only holds its sends while the book is empty.
 const v1 = process.env.POOL_ABI === "v1";
-if (process.env.POOL_ABI && !v1) throw new Error(`POOL_ABI must be v1 or unset, got ${process.env.POOL_ABI}`);
+const v2 = process.env.POOL_ABI === "v2";
+if (process.env.POOL_ABI && !v1 && !v2) throw new Error(`POOL_ABI must be v1, v2 or unset, got ${process.env.POOL_ABI}`);
+const exits = !v1 && !v2;
 const pauseFns = v1 ? { read: "opensPaused", set: "setOpensPaused" } : { read: "hoursPaused", set: "setHoursPaused" };
 const claims = !v1;
 // a v1 pool's Params has no stressMoveBps at the end
@@ -194,6 +198,7 @@ function byTicket(ids: bigint[]): bigint[] {
 }
 let refreshedAt = -Infinity;
 let FROZEN_DELAY: bigint | undefined;
+let FROZEN_GAP: bigint | undefined; // the keeper notes every minute, inside this
 
 async function tick() {
   tickNo++;
@@ -201,7 +206,7 @@ async function tick() {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, bbo: dex === 0 ? index : 100000 + dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
   }
-  const [rawPx, rawBbo, rawNow, rawIds, rawPaused, rawParams, rawLatch, rawUnclaimed, rawEnded, rawFrozenPx, rawFrozenAt] = await batch([
+  const [rawPx, rawBbo, rawNow, rawIds, rawPaused, rawParams, rawLatch, rawUnclaimed, rawEnded, rawFrozenPx, rawFrozenAt, rawSeenAt] = await batch([
     { target: ORACLE_PX, data: encodeAbiParameters([{ type: "uint32" }], [asset.perp]) },
     { target: BBO, data: encodeAbiParameters([{ type: "uint32" }], [asset.bbo]) },
     { target: MULTICALL3, data: encodeFunctionData({ abi: mcAbi, functionName: "getCurrentBlockTimestamp" }) },
@@ -210,22 +215,29 @@ async function tick() {
     poolCall("getParams"), // every tick: a delay cut by applyParams must take effect at once
     poolCall("latch"),
     ...(claims ? [poolCall("unclaimed")] : []),
-    ...(v1 ? [] : [poolCall("ended"), poolCall("frozenPx"), poolCall("frozenAt")]),
+    ...(exits ? [poolCall("ended"), poolCall("frozenPx"), poolCall("frozenAt"), poolCall("frozenSeenAt")] : []),
   ]);
   const [px] = decodeAbiParameters([{ type: "uint64" }], rawPx);
   const oracle = (px as bigint) * asset.scale;
   const now = decodeFunctionResult({ abi: mcAbi, functionName: "getCurrentBlockTimestamp", data: rawNow });
   const [bid, ask] = decodeAbiParameters([{ type: "uint64" }, { type: "uint64" }], rawBbo);
-  const emptyBook = bid === 0n && ask === 0n;
-  const ended = !v1 && (poolResult("ended", rawEnded) as boolean);
-  let exitsHeld = false; // empty book, not yet frozen long enough: exits would revert
-  if (!v1 && emptyBook && !ended) {
+  // as HLPriceGuard refuses it: every guarded read reverts
+  const emptyBook = oracle === 0n || bid === 0n || ask <= bid;
+  const halted = oracle !== 0n && bid === 0n && ask === 0n; // the shape noteFrozen() counts
+  const ended = exits && (poolResult("ended", rawEnded) as boolean);
+  let exitsHeld = emptyBook; // exits would revert
+  if (exits && !ended) {
     const frozenPx = poolResult("frozenPx", rawFrozenPx) as bigint;
     const frozenAt = poolResult("frozenAt", rawFrozenAt) as bigint;
-    if (frozenPx !== oracle) {
-      await send("noteFrozen");
-      exitsHeld = true;
-    } else exitsHeld = now < frozenAt + (FROZEN_DELAY ??= await read("FROZEN_DELAY"));
+    const seenAt = poolResult("frozenSeenAt", rawSeenAt) as bigint;
+    if (halted) {
+      FROZEN_DELAY ??= await read("FROZEN_DELAY");
+      FROZEN_GAP ??= await read("FROZEN_GAP");
+      // the note this tick restarts the clock when the price moved or the last sighting is too old
+      const restarts = frozenPx !== oracle || now > seenAt + FROZEN_GAP!;
+      const noted = restarts || now >= seenAt + 60n ? await send("noteFrozen") : true;
+      exitsHeld = restarts || !noted || now < frozenAt + FROZEN_DELAY!;
+    } else if (!emptyBook && frozenPx !== 0n) await send("noteFrozen"); // the book is back: clear the clock
   }
   // only pending and open positions: closed and cancelled ids leave this list on chain
   const ids = poolResult("activeIds", rawIds) as bigint[];

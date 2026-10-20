@@ -52,10 +52,12 @@ market's deployer while the book is thin, and retired once it is deep enough.
   would hold every position forever (para:PAPER was halted and settled on 2026-10-20; on mainnet
   its oracle and mark then sat at the settle price with an empty book). Two ways out. Once
   `noteFrozen()` has seen the book empty and the oracle unchanged for `FROZEN_DELAY` (1 hour),
-  closes, liquidations and redemptions settle at that oracle, still checked against the
+  with sightings no more than `FROZEN_GAP` (2 minutes) apart (the contract cannot see the book
+  between calls; the keeper notes every minute), closes, liquidations and redemptions settle at that oracle, still checked against the
   reference and the jump latch, until the book returns; opens stay refused. And the operator
   can `proposeEnd(price)`: opens stop at once, and `paramsDelay` later `applyEnd()` (anyone, only
-  while the book is still empty and the reference agrees) ends the pool, after which anyone
+  while the book is still empty, the oracle sits at the proposed price, as Hyperliquid settles a
+  halted market at its oracle, and the reference agrees) ends the pool, after which anyone
   settles every open position at that price.
 - **Caps.** Opens and closes each have a rolling notional cap (`ExposureBudget.Rolling`), so opens
   cannot use up the budget due closes need; net open interest is capped too. On replay of
@@ -68,7 +70,7 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (23.3 KB runtime, under the 24 KB limit: 737 bytes left).
+  guard, and the optimizer on (23.5 KB runtime, under the 24 KB limit: 550 bytes left).
 
 Design, replay results and competitors: `docs/design.md` (Japanese).
 When to retire the pool (graduation criteria, a deadline, stop conditions, what stays

@@ -1364,6 +1364,14 @@ contract LaunchPoolTest is Test {
         MockPrecompile(HLPrecompiles.BBO).set(BBO_IDX, abi.encode(uint64(0), uint64(0)));
     }
 
+    /// What the keeper does while the book is empty: a sighting every minute for `d`.
+    function stayFrozen(uint256 d) internal {
+        for (uint256 t; t < d; t += 60) {
+            vm.warp(block.timestamp + (d - t < 60 ? d - t : 60));
+            pool.noteFrozen();
+        }
+    }
+
     function test_haltedMarketBlocksEverythingWithoutAnExit() public {
         uint256 id = open(alice, true, 1_000 * USDC, 10);
         vm.prank(alice);
@@ -1384,10 +1392,10 @@ contract LaunchPoolTest is Test {
         haltAt(343_000); // -2%, within the latch
         pool.noteFrozen();
         assertEq(pool.frozenPx(), 343e18);
-        vm.warp(block.timestamp + pool.FROZEN_DELAY() - 1);
+        stayFrozen(pool.FROZEN_DELAY() - 1);
         vm.expectPartialRevert(LaunchPool.Breach.selector);
         pool.settle(l);
-        vm.warp(block.timestamp + 1);
+        stayFrozen(1);
         pool.settle(l); // the long closes at the frozen oracle: -2% of $10K
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC - 200 * USDC - 10 * USDC); // loss + both fees
         // no opens while frozen, and the open side still needs its owner's request
@@ -1407,23 +1415,46 @@ contract LaunchPoolTest is Test {
         pool.requestClose(l);
         haltAt(343_000);
         pool.noteFrozen();
-        vm.warp(block.timestamp + 50 minutes);
+        stayFrozen(50 minutes);
         haltAt(343_100); // the oracle moved: not frozen at the old price
-        vm.warp(block.timestamp + 20 minutes);
+        stayFrozen(20 minutes);
         vm.expectPartialRevert(LaunchPool.Breach.selector);
         pool.settle(l);
-        pool.noteFrozen();
-        assertEq(pool.frozenAt(), block.timestamp);
-        // the book comes back for a moment: the clock is cleared, by noteFrozen or by a good read
+        assertEq(pool.frozenAt(), block.timestamp - 20 minutes + 60); // restarted at the first sighting of 343.1
+        // the book comes back for a moment: a good read clears the clock
         setPx(343_100);
         pool.poke();
         assertEq(pool.frozenPx(), 0);
         haltAt(343_100);
-        vm.warp(block.timestamp + 2 hours);
-        vm.expectPartialRevert(LaunchPool.Breach.selector);
-        pool.settle(l); // empty again, but nobody noted it
         pool.noteFrozen();
-        vm.warp(block.timestamp + 1 hours);
+        stayFrozen(1 hours - 1);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l);
+        stayFrozen(1);
+        pool.settle(l);
+    }
+
+    /// Codex round 13: the book live for half an hour with nobody calling the pool, then empty
+    /// again at the same oracle. The gap between sightings restarts the clock.
+    function test_frozenClockRestartsAfterAGapInSightings() public {
+        uint256 l = open(alice, true, 1_000 * USDC, 10);
+        vm.prank(alice);
+        pool.requestClose(l);
+        uint256 at = block.timestamp;
+        haltAt(343_000);
+        pool.noteFrozen();
+        vm.warp(at + 30 minutes);
+        setPx(345_000); // live, and nobody calls the pool
+        vm.warp(at + 1 hours);
+        haltAt(343_000);
+        pool.noteFrozen();
+        assertEq(pool.frozenAt(), block.timestamp);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
+        pool.settle(l);
+        // and a matured spell needs a recent sighting too
+        stayFrozen(1 hours);
+        vm.warp(block.timestamp + pool.FROZEN_GAP() + 1);
+        vm.expectPartialRevert(LaunchPool.Breach.selector);
         pool.settle(l);
     }
 
@@ -1439,7 +1470,7 @@ contract LaunchPoolTest is Test {
         pool.requestClose(l);
         haltAt(343_000); // 2% from the reference, which allows 1.5%
         pool.noteFrozen();
-        vm.warp(block.timestamp + 1 hours);
+        stayFrozen(1 hours);
         r.set(350e18, block.timestamp, 1 days);
         vm.expectPartialRevert(LaunchPool.Breach.selector);
         pool.settle(l);
@@ -1454,7 +1485,7 @@ contract LaunchPoolTest is Test {
         haltAt(300_000);
         r.set(300e18, block.timestamp, 1 days);
         pool.noteFrozen();
-        vm.warp(block.timestamp + 1 hours);
+        stayFrozen(1 hours);
         r.set(300e18, block.timestamp, 1 days);
         vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.Jump, 1280, 200));
         pool.settle(l2);
@@ -1477,6 +1508,9 @@ contract LaunchPoolTest is Test {
         pool.requestOpen(true, 1_000 * USDC, 10);
         vm.warp(block.timestamp + 1 days);
         vm.expectRevert(LaunchPool.BadRequest.selector); // the book is still live
+        pool.applyEnd();
+        haltAt(331_000);
+        vm.expectRevert(LaunchPool.BadRequest.selector); // the oracle is not at the proposed price
         pool.applyEnd();
         haltAt(330_000);
         pool.applyEnd();

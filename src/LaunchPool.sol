@@ -33,10 +33,10 @@ interface IRefSource {
 ///   the fee and haircut they were opened with.
 /// - When the HIP-3 market is halted or delisted its book is empty, so the guard refuses every
 ///   read. Two ways out (Papertrade's para:PAPER was halted and settled on 2026-10-20 this way):
-///   once noteFrozen() has seen the book empty and the oracle unchanged for FROZEN_DELAY,
-///   closes, liquidations and redemptions settle at that oracle (until the book returns); and
-///   the operator can end the pool at a price, `paramsDelay` after proposing it, while the book
-///   is still empty.
+///   once noteFrozen() has seen the book empty and the oracle unchanged for FROZEN_DELAY, with no
+///   gap over FROZEN_GAP between sightings, closes, liquidations and redemptions settle at that
+///   oracle (until the book returns); and the operator can end the pool at the oracle,
+///   `paramsDelay` after proposing that price, while the book is still empty.
 contract LaunchPool {
     using ExposureBudget for ExposureBudget.Rolling;
     using HLPriceGuard for HLPriceGuard.JumpLatch;
@@ -57,6 +57,10 @@ contract LaunchPool {
     /// that oracle. Hyperliquid settles delisted perps on a one-hour average; a live market's
     /// oracle moves every few seconds.
     uint64 public constant FROZEN_DELAY = 1 hours;
+    /// The longest gap between two noteFrozen() sightings that still counts as one empty spell.
+    /// The contract cannot see the book between calls, so a live spell is ruled out only by
+    /// sightings this close together (the keeper notes every minute).
+    uint64 public constant FROZEN_GAP = 2 minutes;
 
     struct Params {
         uint16 maxLeverage;
@@ -130,6 +134,7 @@ contract LaunchPool {
 
     uint256 public frozenPx; // the oracle while the book was seen empty; 0 = not frozen
     uint64 public frozenAt; // when the book was first seen empty at frozenPx
+    uint64 public frozenSeenAt; // the latest sighting
     uint256 public endPrice; // proposed, then final: every position settles here once ended
     uint64 public endAt; // when the proposed end may be applied; 0 = none proposed
     bool public ended;
@@ -373,11 +378,13 @@ contract LaunchPool {
     }
 
     /// Anyone, once the delay has passed, and only while the book is still empty (a live market
-    /// cannot be ended) and the reference, if any, agrees with the price.
+    /// cannot be ended), the oracle sits at the proposed price (Hyperliquid settles a halted
+    /// market at its oracle, so the operator gets no price it could not set there anyway) and the
+    /// reference, if any, agrees.
     function applyEnd() external {
         if (endAt == 0 || block.timestamp < endAt) revert TooEarly();
         HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
-        if (q.bid != 0 || q.ask != 0) revert BadRequest();
+        if (q.bid != 0 || q.ask != 0 || q.oracle != endPrice) revert BadRequest();
         _checkRef(endPrice);
         ended = true;
         endAt = 0;
@@ -491,19 +498,20 @@ contract LaunchPool {
         return _price();
     }
 
-    /// Keepers call this while the book is empty (poke() reverts then). Starts the clock at the
-    /// current oracle, restarts it when the oracle moves, and clears it once the book is back.
+    /// Keepers call this every minute while the book is empty (poke() reverts then). Starts the
+    /// clock at the current oracle, restarts it when the oracle moves or after a gap over
+    /// FROZEN_GAP since the last sighting, and clears it once the book is back.
     function noteFrozen() external {
         HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
         if (q.bid == 0 && q.ask == 0 && q.oracle != 0) {
-            if (q.oracle != frozenPx) {
+            if (q.oracle != frozenPx || block.timestamp > frozenSeenAt + FROZEN_GAP) {
                 frozenPx = q.oracle;
                 frozenAt = uint64(block.timestamp);
                 emit Frozen(q.oracle, frozenAt);
             }
+            frozenSeenAt = uint64(block.timestamp);
         } else if (frozenPx != 0) {
             frozenPx = 0;
-            frozenAt = 0;
         }
     }
 
@@ -641,11 +649,8 @@ contract LaunchPool {
             (reason, observed, limit) = latch.observe(q.oracle, _params.maxJumpBps);
         }
         if (reason != HLPriceGuard.Breach.None) revert Breach(reason, observed, limit);
-        if (frozenPx != 0) {
-            // a good read means the book is back: the frozen clock starts over
-            frozenPx = 0;
-            frozenAt = 0;
-        }
+        // a good read means the book is back: the frozen clock starts over
+        if (frozenPx != 0) frozenPx = 0;
         return q.oracle;
     }
 
@@ -657,7 +662,7 @@ contract LaunchPool {
         HLPriceGuard.Quote memory q = HLPriceGuard.quote(asset);
         if (
             q.bid == 0 && q.ask == 0 && frozenPx != 0 && q.oracle == frozenPx
-                && block.timestamp >= frozenAt + FROZEN_DELAY
+                && block.timestamp >= frozenAt + FROZEN_DELAY && block.timestamp <= frozenSeenAt + FROZEN_GAP
         ) {
             _checkRef(q.oracle);
             (HLPriceGuard.Breach reason, uint256 observed, uint256 limit) = latch.observe(q.oracle, _params.maxJumpBps);
