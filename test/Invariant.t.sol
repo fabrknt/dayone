@@ -6,6 +6,7 @@ import {HLPrecompiles} from "hl-price-guard/HLPrecompiles.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
 import {MockPrecompile, MockUSDC} from "./Mocks.sol";
+import {HLTest} from "hl-price-guard/test/HLTest.sol";
 
 /// Random sequences of every pool action, including parameter changes, latch trips and
 /// rearms. The pool's operator is this handler. Calls that the pool refuses are skipped, not
@@ -201,16 +202,13 @@ contract Handler is Test {
     }
 }
 
-contract LaunchPoolInvariantTest is Test {
+contract LaunchPoolInvariantTest is HLTest {
     Handler h;
     LaunchPool pool;
     MockUSDC usdc;
 
     function setUp() public {
-        address mockCode = address(new MockPrecompile());
-        vm.etch(HLPrecompiles.ORACLE_PX, mockCode.code);
-        vm.etch(HLPrecompiles.MARK_PX, mockCode.code);
-        vm.etch(HLPrecompiles.BBO, mockCode.code);
+        installHL();
         vm.warp(1792190822);
         usdc = new MockUSDC();
         h = new Handler(usdc, LaunchPool.Params({

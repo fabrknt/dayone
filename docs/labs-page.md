@@ -37,7 +37,7 @@ after a redeploy from a key funded with no link to the founder.
                 ]),
                 ("Status", [
                     "Deployed on HyperEVM testnet against xyz:TSLA, with test USDC; that deployment predates the backing check, which is tested locally and awaits a redeploy. Not deployed to mainnet, and not audited. It is not offered to traders.",
-                    "It uses HL Price Guard pinned to a tagged version (v0.2.1). It moves forward when an operator has a concrete need for it, for example a new or pre-IPO listing whose book will start thin; if that is you, request a readiness review.",
+                    "It uses HL Price Guard pinned to a tagged version (v0.3.0). It moves forward when an operator has a concrete need for it, for example a new or pre-IPO listing whose book will start thin; if that is you, request a readiness review.",
                 ]),
             ],
             "labs": True,
@@ -67,7 +67,7 @@ after a redeploy from a key funded with no link to the founder.
                 ]),
                 ("いまの状態", [
                     "HyperEVM の testnet に、xyz:TSLA を対象としてテスト用の USDC で配置しています。この配置は裏付けの検査より前の版で、検査はローカルで確かめ、配置し直しを待っています。mainnet には配置しておらず、監査も受けていません。トレーダー向けに提供していません。",
-                    "HL Price Guard はタグの付いた版(v0.2.1)に固定して使っています。運営者に具体的な必要があるときに進めます。たとえば、板が薄いところから始まる新規上場や pre-IPO の銘柄です。該当する方は運営準備レビューからご連絡ください。",
+                    "HL Price Guard はタグの付いた版(v0.3.0)に固定して使っています。運営者に具体的な必要があるときに進めます。たとえば、板が薄いところから始まる新規上場や pre-IPO の銘柄です。該当する方は運営準備レビューからご連絡ください。",
                 ]),
             ],
             "labs": True,

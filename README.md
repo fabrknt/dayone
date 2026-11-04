@@ -91,7 +91,7 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
-  The pin is `v0.2.1` (f18cdd4); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
+  The pin is `v0.3.0` (b343536; moved from `v0.2.1` on 2026-11-04 with no contract change); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
 - `keeper/keeper.ts`: liquidates first, then settles due closes before due opens (at most
   `OPENS_PER_TICK`, default 5, in ticket order: a ticket when first seen, a fresh one after each try; an open the backing check refuses is

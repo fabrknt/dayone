@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
 import {HLPrecompiles} from "hl-price-guard/HLPrecompiles.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 import {ExposureBudget} from "hl-price-guard/ExposureBudget.sol";
 import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
 import {MockPrecompile, MockUSDC} from "./Mocks.sol";
+import {HLTest} from "hl-price-guard/test/HLTest.sol";
 
 contract MockRef is IRefSource {
     HLPriceGuard.Ref internal r;
@@ -20,7 +20,7 @@ contract MockRef is IRefSource {
     }
 }
 
-contract LaunchPoolTest is Test {
+contract LaunchPoolTest is HLTest {
     // xyz:TSLA encodings: 0x806/0x807 take 10001, 0x80e takes 110001. Prices in 1/1000 USD.
     uint32 constant PERP = 10001;
     uint32 constant BBO_IDX = 110001;
@@ -32,10 +32,7 @@ contract LaunchPoolTest is Test {
     address bob = address(0xB0B);
 
     function setUp() public {
-        address mockCode = address(new MockPrecompile());
-        vm.etch(HLPrecompiles.ORACLE_PX, mockCode.code);
-        vm.etch(HLPrecompiles.MARK_PX, mockCode.code);
-        vm.etch(HLPrecompiles.BBO, mockCode.code);
+        installHL();
         vm.warp(1792190822);
         setPx(350_000); // $350.000
 
