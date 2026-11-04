@@ -113,6 +113,9 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   halted (a LULD pause, news, a market-wide circuit breaker) or the feed is unreadable, stale
   (over 5 minutes old at chain time, or dated over 30 s ahead of it): the deployer's oracle has no listed
   price to follow then either. The feed is read at most every 30 s (`keeper/e2e.sh` step 5b).
+  While opens should be paused (calendar or halt) the keeper settles none itself, even if its pause
+  transaction failed. `PRIMARY_HALTS` needs a pool with a pauser role: on a `POOL_ABI=v1` pool the one
+  pause flag is also the operator's, and a clear feed could lift it, so the keeper refuses that.
   On an empty book (what the guard refuses: no oracle, no bid, or ask at or under bid) it sends nothing
   that would revert; on a halted one, (0, 0), it calls `noteFrozen()` once a minute, and again during a long
   run of exits so the sighting never goes older than `FROZEN_GAP`, settles exits once the frozen hour is
