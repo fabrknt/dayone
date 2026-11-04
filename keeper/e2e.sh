@@ -2,6 +2,7 @@
 # Local end-to-end: anvil + mock precompiles at their real addresses + pool + keeper.
 #   ./keeper/e2e.sh
 set -e
+set -o pipefail
 cd "$(dirname "$0")/.."
 PORT=8546
 RPC=http://127.0.0.1:$PORT
@@ -102,7 +103,8 @@ feed other 5; hk
 check "open once the feed shows only another stock halted" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
 feed clear 600; hk
 check "paused on a 10-minute-old feed" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
-feed clear 5; hk >/dev/null
+feed clear 5; hk
+check "open again on a clear feed (no items)" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
 echo "6. MARKET_HOURS=krx: Monday 23:00 KST pauses new positions, Tuesday 10:00 KST reopens them"
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true

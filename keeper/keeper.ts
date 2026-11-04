@@ -87,6 +87,8 @@ if (marketHours && !hoursFn) throw new Error(`MARKET_HOURS must be nyse or krx, 
 // live feed with a saved one (keeper/e2e.sh)
 const haltSymbol = process.env.PRIMARY_HALTS;
 if (haltSymbol && marketHours !== "nyse") throw new Error("PRIMARY_HALTS needs MARKET_HOURS=nyse (the feed is Nasdaq's)");
+// a v1 pool has one pause flag, the operator's too: unpausing it on a clear feed could lift the operator's own pause
+if (haltSymbol && process.env.POOL_ABI === "v1") throw new Error("PRIMARY_HALTS needs a pool with a pauser role (not POOL_ABI=v1)");
 const HALT_SCENARIO = bundledScenario("us-hip3-perp");
 const HALTS_EVERY_MS = 30_000;
 let haltFeed: { halts: Halt[]; fetchedAt: number } | undefined;
@@ -243,7 +245,8 @@ async function keepSighting(): Promise<boolean> {
 async function tick() {
   tickNo++;
   sighting = false;
-  // started now, alongside the chain reads, so a slow feed does not hold up liquidations
+  // started now, so it overlaps the chain reads; a feed slower than them still delays the tick,
+  // liquidations included, by at most its 10 s timeout
   const halts = haltSymbol ? readHalts() : undefined;
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
@@ -291,6 +294,8 @@ async function tick() {
   const [anchor] = poolResult("latch", rawLatch) as [bigint, bigint];
   const moved = anchor === 0n ? Infinity : Number(((oracle > anchor ? oracle - anchor : anchor - oracle) * 1_000_000n) / anchor) / 100;
 
+  // while opens should be paused the keeper settles none itself, even if setting the pause failed
+  let opensHeld = false;
   if (hoursFn) {
     // Outside the calendar the keeper cannot tell open from closed, so it keeps opens paused
     // and carries on settling and liquidating; the calendar needs renewing.
@@ -309,6 +314,7 @@ async function tick() {
       haltDetail = st.detail;
       if (st.halted) shouldPause = true;
     }
+    opensHeld = shouldPause;
     if (poolResult(pauseFns.read, rawPaused) !== shouldPause) await send(pauseFns.set, [shouldPause]);
   }
 
@@ -356,7 +362,7 @@ async function tick() {
     }
     byTicket(opens);
   }
-  for (const id of emptyBook ? [] : opens.slice(0, OPENS_PER_TICK)) {
+  for (const id of emptyBook || opensHeld ? [] : opens.slice(0, OPENS_PER_TICK)) {
     ticket.set(id, nextTicket++);
     if (await send("settle", [id])) {
       openRetry.delete(id);
