@@ -7,6 +7,9 @@
 //   1. with MARKET_HOURS=nyse or krx (the pool's pauser key, or the operator's), pause new positions while that
 //      exchange is closed: out of hours there is no independent stock price to check the
 //      deployer's oracle against. nyse for US stocks, krx for xyz:SKHX and xyz:SMSN;
+//      with PRIMARY_HALTS=<symbol> (nyse only) also while Nasdaq's halts feed shows that stock
+//      halted (LULD pause, news, market-wide circuit breaker), or the feed is unreadable or stale,
+//      for the same reason. The halt state is prebell's (prebell/guard, us-hip3-perp scenario);
 //   2. liquidate every open position below its stored maintenance at the current oracle;
 //   3. settle every pending open or close whose settleDelay has passed (from activeIds(), so
 //      the work is bounded by live positions, not by every id ever issued);
@@ -31,6 +34,8 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { marketStatus as nyseStatus, CALENDAR_2026, CALENDAR_2027 } from "./campana.mjs";
 import { marketStatus as krxStatus } from "./krx.mjs";
+import { NASDAQ_HALTS_URL, marketStateFor, parseNasdaqFeed, type Halt } from "prebell/guard";
+import { bundledScenario } from "prebell/scenario";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
 const BBO: Address = "0x000000000000000000000000000000000000080e";
@@ -78,6 +83,29 @@ const nyseChecked = (ts: number) => {
 };
 const hoursFn = ({ nyse: nyseChecked, krx: krxStatus } as Record<string, (ts: number) => { status: string }>)[marketHours ?? ""];
 if (marketHours && !hoursFn) throw new Error(`MARKET_HOURS must be nyse or krx, got ${marketHours}`);
+// the primary listing's halts (prebell), read at most every HALTS_EVERY_MS; HALTS_FILE replaces the
+// live feed with a saved one (keeper/e2e.sh)
+const haltSymbol = process.env.PRIMARY_HALTS;
+if (haltSymbol && marketHours !== "nyse") throw new Error("PRIMARY_HALTS needs MARKET_HOURS=nyse (the feed is Nasdaq's)");
+const HALT_SCENARIO = bundledScenario("us-hip3-perp");
+const HALTS_EVERY_MS = 30_000;
+let haltFeed: { halts: Halt[]; fetchedAt: number } | undefined;
+let haltsReadMs = -Infinity;
+let haltDetail = "";
+async function readHalts(): Promise<void> {
+  if (Date.now() - haltsReadMs < HALTS_EVERY_MS) return;
+  haltsReadMs = Date.now();
+  try {
+    const xml = process.env.HALTS_FILE
+      ? readFileSync(process.env.HALTS_FILE, "utf8")
+      : await (await fetch(NASDAQ_HALTS_URL, { signal: AbortSignal.timeout(10_000) })).text();
+    const f = parseNasdaqFeed(xml);
+    haltFeed = { halts: f.halts, fetchedAt: f.publishedAt };
+  } catch (e) {
+    // keep the last feed: it goes stale on its own, and marketStateFor then reads it as halted
+    console.log(`${new Date().toISOString()} halts feed unreadable: ${(e as Error).message}`);
+  }
+}
 // HLPriceGuard.Breach, in order
 const BREACH = ["None", "EmptyBook", "Spread", "MarkOracle", "MidOracle", "RefStale", "RefOracle", "Jump"];
 
@@ -215,6 +243,8 @@ async function keepSighting(): Promise<boolean> {
 async function tick() {
   tickNo++;
   sighting = false;
+  // started now, alongside the chain reads, so a slow feed does not hold up liquidations
+  const halts = haltSymbol ? readHalts() : undefined;
   if (!asset) {
     const [dex, index, szDecimals] = await read("asset");
     asset = { perp: dex * 10000 + index, bbo: dex === 0 ? index : 100000 + dex * 10000 + index, scale: 10n ** (12n + BigInt(szDecimals)) };
@@ -270,6 +300,14 @@ async function tick() {
     } catch (e) {
       console.log(`${new Date().toISOString()} CALENDAR EXPIRED, opens stay paused: ${(e as Error).message}`);
       shouldPause = true;
+    }
+    if (haltSymbol) {
+      // judged at chain time, the feed by its own publication time; a missing or stale feed is a halt
+      await halts;
+      const st = marketStateFor(HALT_SCENARIO, haltSymbol, Number(now), haltFeed);
+      if (st.detail !== haltDetail) console.log(`${new Date().toISOString()} ${haltSymbol} primary market: ${st.halted ? `halted (${st.detail})` : "trading"}`);
+      haltDetail = st.detail;
+      if (st.halted) shouldPause = true;
     }
     if (poolResult(pauseFns.read, rawPaused) !== shouldPause) await send(pauseFns.set, [shouldPause]);
   }

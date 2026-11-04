@@ -16,7 +16,7 @@ trap 'kill $PIDS 2>/dev/null' EXIT INT TERM
 until cast block-number --rpc-url $RPC >/dev/null 2>&1; do sleep 0.2; done
 
 forge build --silent
-CODE=$(forge inspect MockPrecompile deployedBytecode)
+CODE=$(forge inspect HLMockPrecompile deployedBytecode)
 for a in 806 807 80e; do cast rpc --rpc-url $RPC anvil_setCode 0x0000000000000000000000000000000000000$a $CODE >/dev/null; done
 # Multicall3 at its usual address, as on HyperEVM (the keeper batches its reads through it)
 cast rpc --rpc-url $RPC anvil_setCode 0xcA11bde05977b3631167028862bE2a173976CA11 $(cat keeper/multicall3.code) >/dev/null

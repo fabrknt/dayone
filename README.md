@@ -93,6 +93,10 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.3.0` (b343536; moved from `v0.2.1` on 2026-11-04 with no contract change); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
+- `prebell` (`fabrknt/prebell`, `package.json`, pinned to a commit from GitHub): the keeper's
+  `PRIMARY_HALTS` reads the primary listing's halt state through `prebell/guard`
+  (`parseNasdaqFeed`, `marketStateFor` under prebell's `us-hip3-perp` scenario). Move the pin on
+  purpose, then run `keeper/e2e.sh`.
 - `keeper/keeper.ts`: liquidates first, then settles due closes before due opens (at most
   `OPENS_PER_TICK`, default 5, in ticket order: a ticket when first seen, a fresh one after each try; an open the backing check refuses is
   retried after a jittered backoff of 1 to 64 ticks, sooner once a close or liquidation frees
@@ -104,7 +108,11 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   `MARKET_HOURS=nyse` or `krx` it pauses new positions while that exchange is closed
   (`keeper/campana.mjs` for NYSE, 2026 and 2027; `keeper/krx.mjs` for xyz:SKHX and xyz:SMSN: 09:00-15:30 KST,
   the 2026 calendar with its 17 weekday closures and the CSAT shift on 11-19, and it refuses dates
-  outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`).
+  outside the calendar instead of guessing; tests in `keeper/krx.test.mjs`). With
+  `PRIMARY_HALTS=TSLA` (nyse only) it also pauses them while Nasdaq's halts feed shows the stock
+  halted (a LULD pause, news, a market-wide circuit breaker) or the feed is unreadable, stale
+  (over 5 minutes old at chain time, or dated over 30 s ahead of it): the deployer's oracle has no listed
+  price to follow then either. The feed is read at most every 30 s (`keeper/e2e.sh` step 5b).
   On an empty book (what the guard refuses: no oracle, no bid, or ask at or under bid) it sends nothing
   that would revert; on a halted one, (0, 0), it calls `noteFrozen()` once a minute, and again during a long
   run of exits so the sighting never goes older than `FROZEN_GAP`, settles exits once the frozen hour is

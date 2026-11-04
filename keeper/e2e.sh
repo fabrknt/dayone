@@ -20,7 +20,7 @@ trap 'kill $ANVIL' EXIT
 until cast block-number --rpc-url $RPC >/dev/null 2>&1; do sleep 0.2; done
 
 forge build --silent
-CODE=$(forge inspect MockPrecompile deployedBytecode)
+CODE=$(forge inspect HLMockPrecompile deployedBytecode)
 for a in 806 807 80e; do cast rpc --rpc-url $RPC anvil_setCode 0x0000000000000000000000000000000000000$a $CODE >/dev/null; done
 # Multicall3 at its usual address, as on HyperEVM (the keeper batches its reads through it)
 cast rpc --rpc-url $RPC anvil_setCode 0xcA11bde05977b3631167028862bE2a173976CA11 $(cat keeper/multicall3.code) >/dev/null
@@ -76,6 +76,33 @@ check "paused on Saturday" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792418400 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2026-10-19 14:00 UTC = 10:00 EDT
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Monday 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+echo "5b. PRIMARY_HALTS=TSLA (prebell): a Nasdaq LULD halt pauses new positions, a clear feed reopens them, a stale feed pauses"
+# a saved Nasdaq feed (prebell's fixture) rewritten for chain time: published at $2 seconds before
+# now, with TSLA halted at 09:58 ET if $1 is "halted"
+feed() {
+  node -e '
+    const fs = require("node:fs");
+    const [src, out, mode, age] = process.argv.slice(1);
+    const x = fs.readFileSync(src, "utf8");
+    const at = new Date((1792418400 - Number(age)) * 1000).toUTCString();
+    const item = x.match(/<item>[\s\S]*?<\/item>/)[0];
+    const tsla = item.replace(/<title>[^<]*/, "<title>TSLA").replace(/<ndaq:IssueSymbol>[^<]*/, "<ndaq:IssueSymbol>TSLA")
+      .replace(/<ndaq:HaltDate>[^<]*/, "<ndaq:HaltDate>10/19/2026").replace(/<ndaq:HaltTime>[^<]*/, "<ndaq:HaltTime>09:58:00.000")
+      .replace(/<ndaq:ReasonCode>[^<]*/, "<ndaq:ReasonCode>LUDP");
+    const items = mode === "halted" ? tsla : mode === "other" ? tsla.replace(/TSLA/g, "AAPL") : "";
+    fs.writeFileSync(out, x.replace(/<item>[\s\S]*<\/item>/, items).replace(/(<channel>[\s\S]*?<pubDate>)[^<]*/, `$1${at}`)
+      .replace(/<ndaq:numItems>\d+/, `<ndaq:numItems>${items ? 1 : 0}`));
+  ' node_modules/prebell/fixtures/nasdaq-tradehalts.xml $FEED $1 $2
+}
+FEED=$(mktemp)
+hk() { RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse PRIMARY_HALTS=TSLA HALTS_FILE=$FEED node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused|primary market" | sed 's/^[^ ]* /  keeper: /'; }
+feed halted 5; hk
+check "paused while TSLA is halted" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+feed other 5; hk
+check "open once the feed shows only another stock halted" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+feed clear 600; hk
+check "paused on a 10-minute-old feed" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
+feed clear 5; hk >/dev/null
 echo "6. MARKET_HOURS=krx: Monday 23:00 KST pauses new positions, Tuesday 10:00 KST reopens them"
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
