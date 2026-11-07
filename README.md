@@ -213,3 +213,6 @@ sequences do not halt the book yet); on a market with no reference, a live book 
 watch that the keeper is alive.
 
 `forge test` (70 tests); `npm install && npm run demo` (36 checks with `prebell`, 32 without); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+
+## License
+Apache-2.0 (`LICENSE`).

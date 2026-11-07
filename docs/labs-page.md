@@ -6,9 +6,10 @@ structure as today: `(title, text)` pairs render as cards, plain strings as para
 Figures are as of 2026-10-21 (backing check, graduation criteria, halted markets and review count changed on 10-19 to 10-21) and follow hl-price-guard 1f8ff12; update this file first when they change.
 The hip3 site no longer takes this dict as is (the C5 design, 2026-10-18); the hip3 window ports it by hand,
 so keep the meaning of each sentence stable.
-No contract addresses in this copy (founder, 10-18): the testnet operator was funded from the
-founder's earlier deployer address, so the pool links to it on chain. Add the pool address only
-after a redeploy from a key funded with no link to the founder.
+Contract addresses: on 10-18 they were left out because the testnet operator was funded from the
+founder's earlier deployer address; on 11-07 the founder accepted that link, so they may be added.
+Add them after the current contract is redeployed (the pool in docs/testnet.md is a v1 without the
+backing check). The repo is being prepared to go public (Apache-2.0): link it from the page then.
 
 ```python
     "labs/day-one": {

@@ -9,9 +9,10 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   (mode 600, with the `0x` prefix). Its HyperCore account was created by sending 0.05 HYPE from the
   EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be turned on after.
 - This pool predates the backing check, `seed`, the pauser role and `claim()` (keeper
-  `POOL_ABI=v1`; the page says it has no backing check). Redeploying the current contract waits on
-  a decision about a new key funded with no link to the founder (the operator above was funded
-  from the founder's earlier deployer address).
+  `POOL_ABI=v1`; the page says it has no backing check). The next step is to redeploy the current contract
+  and run it once as an operator would, following the README from the top. The operator above was
+  funded from the founder's earlier deployer address, so the pool links to it on chain; the founder
+  accepted that on 2026-11-07, so the same dedicated key can be reused.
 - Earlier pools, abandoned (test positions closed, about $0.20 of mock-USDC fees left in each):
   `0x7103…d6D6` (curve, previous key) and `0x372E…9040` (flat haircut).
 - First run: `poke` with the real precompiles, then a $200 long requested and settled by the
@@ -80,7 +81,8 @@ settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=
    It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
    position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K,
    `stressMoveBps` 10%, and a seed of `SEED` mock USDC (default 10,000, minted to the deployer and
-   paid in for shares), which backs about $100K of one-sided notional.
+   paid in for shares), which backs about $100K of longs and, separately, $100K of shorts
+   (each side gross). How to choose these for another market: `docs/sizing.md`.
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
    run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
