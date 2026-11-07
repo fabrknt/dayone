@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
 // The precompile mock comes from hl-price-guard (test/HLTest.sol); this name is kept for the

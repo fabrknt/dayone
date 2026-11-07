@@ -1,12 +1,41 @@
 # Day One — Fabrknt Labs
 
-Private. Research and a reference implementation, not a product. Not offered to traders.
-Deployed on HyperEVM testnet against xyz:TSLA (2026-10-17, `docs/testnet.md`).
-It studies how to make a newly listed HIP-3 perp tradable from day one without inviting the attacks
-a thin book invites: initial liquidity, price anomalies, exposure caps and stop conditions.
-Part of Fabrknt for HIP-3 (fabrknt.com/hip3/labs/day-one); it moves forward only when an operator
-(design partner) has a concrete need for it.
+**For the deployer of a newly listed HIP-3 perp:** a counterparty pool that keeps a thin book
+tradable from day one without inviting the attacks a thin book invites (a push like
+Papertrade's on 2026-10-10, a bad update like SK Hynix's on 2026-07-27, a paper-mint straddle),
+retired once the book is deep enough. The operator runs it; Fabrknt does not.
 
+Status: an unaudited reference implementation, deployed only on HyperEVM testnet (against xyz:TSLA,
+`docs/testnet.md`). Not for production funds. Not offered to traders. Part of Fabrknt for HIP-3
+(fabrknt.com/hip3/labs/day-one).
+
+| You want to | Where |
+|---|---|
+| See it work locally, no keys | `npm install && npm run demo` (below) |
+| Choose the seed, caps and latch for your market | `docs/sizing.md` |
+| Deploy a pool | `script/DeployTestnet.s.sol` (a testnet example: mock USDC, mark/mid/reference bounds off; see `docs/sizing.md` §5), `docs/testnet.md` |
+| Run the keeper (settle, liquidate, claim, poke) | `keeper/keeper.ts`; always-on: `deploy/cohost/` |
+| Pause outside the stock's trading hours or during a halt | `MARKET_HOURS=nyse\|krx`; `PRIMARY_HALTS=<symbol>` needs `prebell`, which is not public yet |
+| End a halted or delisted market | `noteFrozen`, `proposeEnd` / `applyEnd` (below) |
+| Show traders the pool | `web/` |
+| Know why each rule exists | "How the pool works" below, `docs/design.md`, the Review table |
+
+## Quick start
+Needs Foundry, Node 24 and zsh (the scripts are zsh; macOS has it, on Debian/Ubuntu `apt install zsh`).
+
+    git clone --recurse-submodules https://github.com/fabrknt/dayone && cd dayone
+    npm install
+    npm run demo
+
+`npm run demo` (`keeper/e2e.sh`) starts anvil, puts mock precompiles at their real addresses,
+deploys a seeded pool and runs the keeper through opens, settles, liquidation, the jump latch,
+trading hours, a halted market and an operator end, checking each step; it ends with `all ok` (about 10 minutes).
+`prebell` (Nasdaq halts) is not public yet, so `npm install` skips it without a message and the demo
+skips that step and says so; `REQUIRE_PREBELL=1 npm run demo` fails instead of skipping.
+Price reading and caps come from [hl-price-guard](https://github.com/fabrknt/hl-price-guard),
+pinned by tag.
+
+## How the pool works
 The mechanism studied: a loss-funded counterparty pool for a newly listed HIP-3 perp, run by the
 market's deployer while the book is thin, and retired once it is deep enough.
 
@@ -93,7 +122,8 @@ undecided with the operator): `docs/graduation.md` (Japanese, a draft until an o
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
   The pin is `v0.3.0` (b343536; moved from `v0.2.1` on 2026-11-04 with no contract change); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
-- `prebell` (`fabrknt/prebell`, `package.json`, pinned to a commit from GitHub): the keeper's
+- `prebell` (`fabrknt/prebell`, not public yet, an optional dependency in `package.json` pinned to a commit
+  from GitHub; the keeper and `npm run demo` run without it): the keeper's
   `PRIMARY_HALTS` reads the primary listing's halt state through `prebell/guard`
   (`parseNasdaqFeed`, `marketStateFor` under prebell's `us-hip3-perp` scenario). Move the pin on
   purpose, then run `keeper/e2e.sh`.
@@ -174,7 +204,7 @@ Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 cl
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
 close positions left open after graduation (`docs/graduation.md`, to settle with an operator);
 whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
-exact instead of assumed, at the cost of capped wins (as hyperevm-perp and hyperevm-knockout do);
+exact instead of assumed, at the cost of capped wins (as [hyperevm-perp](https://github.com/psyto/hyperevm-perp) does);
 the independent reference (`maxRefOracleBps` is 0 on testnet; `PythRef` needs Hermes update data,
 which has required an API key since 2026-08-26); the halted-market exits on the page (it does not yet
 show a frozen clock, a proposed end or an ended pool) and in `test/Invariant.t.sol` (its random
@@ -182,4 +212,4 @@ sequences do not halt the book yet); on a market with no reference, a live book 
 `FROZEN_GAP` between two keeper sightings that comes back to exactly the same oracle goes unseen, so
 watch that the keeper is alive.
 
-`forge test` (70 tests); `npm install && ./keeper/e2e.sh` (32 checks); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+`forge test` (70 tests); `npm install && npm run demo` (36 checks with `prebell`, 32 without); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.

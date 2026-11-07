@@ -34,8 +34,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { marketStatus as nyseStatus, CALENDAR_2026, CALENDAR_2027 } from "./campana.mjs";
 import { marketStatus as krxStatus } from "./krx.mjs";
-import { NASDAQ_HALTS_URL, marketStateFor, parseNasdaqFeed, type Halt } from "prebell/guard";
-import { bundledScenario } from "prebell/scenario";
+import type { Halt } from "prebell/guard";
 
 const ORACLE_PX: Address = "0x0000000000000000000000000000000000000807";
 const BBO: Address = "0x000000000000000000000000000000000000080e";
@@ -89,7 +88,16 @@ const haltSymbol = process.env.PRIMARY_HALTS;
 if (haltSymbol && marketHours !== "nyse") throw new Error("PRIMARY_HALTS needs MARKET_HOURS=nyse (the feed is Nasdaq's)");
 // a v1 pool has one pause flag, the operator's too: unpausing it on a clear feed could lift the operator's own pause
 if (haltSymbol && process.env.POOL_ABI === "v1") throw new Error("PRIMARY_HALTS needs a pool with a pauser role (not POOL_ABI=v1)");
-const HALT_SCENARIO = bundledScenario("us-hip3-perp");
+// prebell is an optional dependency: loaded only for PRIMARY_HALTS, so the keeper runs without it
+const prebell = haltSymbol ? await loadPrebell() : undefined;
+async function loadPrebell() {
+  try {
+    const [guard, scenario] = await Promise.all([import("prebell/guard"), import("prebell/scenario")]);
+    return { ...guard, scenario: scenario.bundledScenario("us-hip3-perp") };
+  } catch (e) {
+    throw new Error(`PRIMARY_HALTS needs the prebell package (fabrknt/prebell, not public yet), which is not installed: ${(e as Error).message}`);
+  }
+}
 const HALTS_EVERY_MS = 30_000;
 let haltFeed: { halts: Halt[]; fetchedAt: number } | undefined;
 let haltsReadMs = -Infinity;
@@ -100,8 +108,8 @@ async function readHalts(): Promise<void> {
   try {
     const xml = process.env.HALTS_FILE
       ? readFileSync(process.env.HALTS_FILE, "utf8")
-      : await (await fetch(NASDAQ_HALTS_URL, { signal: AbortSignal.timeout(10_000) })).text();
-    const f = parseNasdaqFeed(xml);
+      : await (await fetch(prebell!.NASDAQ_HALTS_URL, { signal: AbortSignal.timeout(10_000) })).text();
+    const f = prebell!.parseNasdaqFeed(xml);
     haltFeed = { halts: f.halts, fetchedAt: f.publishedAt };
   } catch (e) {
     // keep the last feed: it goes stale on its own, and marketStateFor then reads it as halted
@@ -309,7 +317,7 @@ async function tick() {
     if (haltSymbol) {
       // judged at chain time, the feed by its own publication time; a missing or stale feed is a halt
       await halts;
-      const st = marketStateFor(HALT_SCENARIO, haltSymbol, Number(now), haltFeed);
+      const st = prebell!.marketStateFor(prebell!.scenario, haltSymbol, Number(now), haltFeed);
       if (st.detail !== haltDetail) console.log(`${new Date().toISOString()} ${haltSymbol} primary market: ${st.halted ? `halted (${st.detail})` : "trading"}`);
       haltDetail = st.detail;
       if (st.halted) shouldPause = true;

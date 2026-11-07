@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
@@ -12,7 +12,8 @@ import {MockUSDC} from "../test/Mocks.sol";
 /// The testnet book sits far from its oracle (mid 612 bp above it on 10-17), so the mark/mid
 /// bounds are off here; the jump latch, two-step settlement and both caps stay on.
 /// A mock USDC is deployed as collateral; mint it with MockUSDC.mint. The pool is seeded with
-/// SEED (default 10,000) mock USDC, which with stressMoveBps at 10% backs about $100K net.
+/// SEED (default 10,000) mock USDC, which with stressMoveBps at 10% backs about $100K of longs and,
+/// separately, $100K of shorts (each side gross: the backing check never nets them).
 ///
 ///   forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm \
 ///     --broadcast --private-key $KEY

@@ -77,6 +77,7 @@ check "paused on Saturday" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool
 cast rpc --rpc-url $RPC evm_setNextBlockTimestamp 1792418400 >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null  # Mon 2026-10-19 14:00 UTC = 10:00 EDT
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=nyse node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "open on Monday 10:00 ET" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+if [ -d node_modules/prebell ]; then
 echo "5b. PRIMARY_HALTS=TSLA (prebell): a Nasdaq LULD halt pauses new positions, a clear feed reopens them, a stale feed pauses"
 # a saved Nasdaq feed (prebell's fixture) rewritten for chain time: published at $2 seconds before
 # now, with TSLA halted at 09:58 ET if $1 is "halted"
@@ -105,6 +106,11 @@ feed clear 600; hk
 check "paused on a 10-minute-old feed" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true
 feed clear 5; hk
 check "open again on a clear feed (no items)" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" false
+elif [ -n "$REQUIRE_PREBELL" ]; then
+  echo "FAIL 5b: REQUIRE_PREBELL is set but prebell is not installed"; exit 1
+else
+  echo "5b. skipped: PRIMARY_HALTS needs prebell (not public yet), not installed" >&2
+fi
 echo "6. MARKET_HOURS=krx: Monday 23:00 KST pauses new positions, Tuesday 10:00 KST reopens them"
 RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K2 MARKET_HOURS=krx node --disable-warning=ExperimentalWarning keeper/keeper.ts --once | grep -E "setHoursPaused" | sed 's/^[^ ]* /  keeper: /'
 check "paused at 23:00 KST" "$(cast call --rpc-url $RPC $POOL "opensPaused()(bool)")" true

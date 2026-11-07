@@ -2,8 +2,13 @@
   "name": "dayone-keeper",
   "private": true,
   "type": "module",
+  "scripts": {
+    "demo": "./keeper/e2e.sh"
+  },
   "dependencies": {
-    "prebell": "github:fabrknt/prebell#cbd4dd7",
     "viem": "2.57.7"
+  },
+  "optionalDependencies": {
+    "prebell": "github:fabrknt/prebell#cbd4dd7"
   }
 }
