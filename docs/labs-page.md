@@ -1,5 +1,9 @@
 # Copy for fabrknt.com/hip3/labs/day-one
 
+> 2026-11-07: the page copy was updated directly in `fabrknt/hip3` `pages/build.py` (`day_one()`):
+> seeded pool and backing check, halted markets, the 10-19 safe caps, v0.3.0, `npm run demo`, the
+> sizing guide, 13 review rounds. That function is now the current copy; the dict below is the 10-21 version.
+
 Source of truth for the Day One page on the HIP-3 site. The page itself is built in `fabrknt/hip3`
 (`pages/build.py`, key `"labs/day-one"`); paste the dict below over the existing entry. Same
 structure as today: `(title, text)` pairs render as cards, plain strings as paragraphs.
