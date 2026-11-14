@@ -22,9 +22,9 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
 ## Earlier deployments
 - `0x183AA811bFc913fCf5630cbAA4B85b3a8499a707` (2026-10-18, mock USDC `0x19B4…d1C4`): before the
-  backing check, `seed`, the pauser role and `claim()` (keeper `POOL_ABI=v1`). Its keeper on the
-  always-on host still drives it with the operator key; retire it there before moving that keeper
-  to the new pool.
+  backing check, `seed`, the pauser role and `claim()` (keeper `POOL_ABI=v1`). Retired on
+  2026-11-14: its keeper on the always-on host was replaced by the current pool's, so nothing drives
+  it now (opens were last paused for NYSE hours; no positions were open).
 - Abandoned (test positions closed, about $0.20 of mock-USDC fees left in each): `0x7103…d6D6`
   (curve, previous key) and `0x372E…9040` (flat haircut).
 - First run on the 10-17/10-18 pools: `poke` with the real precompiles, then a $200 long requested and settled by the
@@ -35,7 +35,8 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   status success as done (anything else is logged REVERTED). The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
 - Its page: `?net=testnet&pool=0x183AA811bFc913fCf5630cbAA4B85b3a8499a707&usdc=0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`.
-- Keeper host: moving from a local machine to an existing always-on host as its own systemd
+- Keeper host: an existing always-on host (since 2026-11-14 it runs the current pool with the keeper
+  key; before that the 10-18 pool with the operator key), as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
   checksum-verified Node), the key in `/etc/dayone-keeper` readable only by that user, one unit

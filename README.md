@@ -209,8 +209,7 @@ reproduced with a PoC test before it was fixed (PoCs live in throwaway worktrees
 | 13, 13b, 13c (56fc38b, 7326bf6, 5412c35) | CHANGES, CHANGES, APPROVE | halted or delisted market. 13: a live spell between two same-oracle sightings was invisible (HIGH) → sightings at most `FROZEN_GAP` apart; `applyEnd` took any operator price without a reference → the oracle must sit at it; the keeper broke on pools from just before this change → `POOL_ABI=v2`; its empty-book test was weaker than the guard's. 13b: a long drain could outrun the gap, and a non-halted rejected book did not clear the clock (keeper). 13c: no findings |
 
 ## Not done
-Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
-on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
+KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
 close positions left open after graduation (to settle with an operator);
 whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
 exact instead of assumed, at the cost of capped wins (as [hyperevm-perp](https://github.com/psyto/hyperevm-perp) does);
