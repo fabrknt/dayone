@@ -1,9 +1,10 @@
 # Day One — Fabrknt Labs
 
 **For the deployer of a newly listed HIP-3 perp:** a counterparty pool that keeps a thin book
-tradable from day one without inviting the attacks a thin book invites (a push like
+tradable from day one, with limits aimed at the attacks a thin book invites (a push like
 Papertrade's on 2026-10-10, a bad update like SK Hynix's on 2026-07-27, a paper-mint straddle),
-retired once the book is deep enough. The operator runs it; Fabrknt does not.
+retired once the book is deep enough. Each limit is checked against the replay or test named below,
+not proven in general. The operator runs it; Fabrknt does not.
 
 Status: an unaudited reference implementation, deployed only on HyperEVM testnet (against xyz:TSLA,
 `docs/testnet.md`). Not for production funds. Not offered to traders. Part of Fabrknt for HIP-3
@@ -18,10 +19,10 @@ Status: an unaudited reference implementation, deployed only on HyperEVM testnet
 | Pause outside the stock's trading hours or during a halt | `MARKET_HOURS=nyse\|krx`; `PRIMARY_HALTS=<symbol>` needs `prebell`, which is not public yet |
 | End a halted or delisted market | `noteFrozen`, `proposeEnd` / `applyEnd` (below) |
 | Show traders the pool | `web/` |
-| Know why each rule exists | "How the pool works" below, `docs/design.md`, the Review table |
+| Know why each rule exists | "How the pool works" below and the Review table |
 
 ## Quick start
-Needs Foundry, Node 24 and zsh (the scripts are zsh; macOS has it, on Debian/Ubuntu `apt install zsh`).
+Needs Foundry, Node 24, Python 3 and zsh (the scripts are zsh; macOS has it, on Debian/Ubuntu `apt install zsh`).
 
     git clone --recurse-submodules https://github.com/fabrknt/dayone && cd dayone
     npm install
@@ -30,8 +31,9 @@ Needs Foundry, Node 24 and zsh (the scripts are zsh; macOS has it, on Debian/Ubu
 `npm run demo` (`keeper/e2e.sh`) starts anvil, puts mock precompiles at their real addresses,
 deploys a seeded pool and runs the keeper through opens, settles, liquidation, the jump latch,
 trading hours, a halted market and an operator end, checking each step; it ends with `all ok` (about 10 minutes).
-`prebell` (Nasdaq halts) is not public yet, so `npm install` skips it without a message and the demo
-skips that step and says so; `REQUIRE_PREBELL=1 npm run demo` fails instead of skipping.
+`prebell` (Nasdaq halts) is not public yet and is not in `package.json`, so the demo skips that
+step and says so; `REQUIRE_PREBELL=1 npm run demo` fails instead of skipping. With access to it,
+`npm install --no-save github:fabrknt/prebell` turns the step (and `PRIMARY_HALTS`) on.
 Price reading and caps come from [hl-price-guard](https://github.com/fabrknt/hl-price-guard),
 pinned by tag.
 
@@ -93,9 +95,9 @@ market's deployer while the book is thin, and retired once it is deep enough.
   halted market at its oracle, and the reference agrees) ends the pool, after which anyone
   settles every open position at that price.
 - **Caps.** Opens and closes each have a rolling notional cap (`ExposureBudget.Rolling`), so opens
-  cannot use up the budget due closes need; net open interest is capped too. On replay of
-  Papertrade's 10-10 incident, the per-minute cap is what made the push unprofitable; choosing the
-  oracle over the BBO cut it only 15%.
+  cannot use up the budget due closes need; net open interest is capped too. In our replay of
+  Papertrade's 10-10 incident (an estimate from its public trades, not a bound), the per-minute cap
+  is what brought the take below the cost of the push; choosing the oracle over the BBO cut it only 15%.
 - **Operator limits.** Parameter, bounds and reference changes take effect `paramsDelay` after
   they are proposed; raising the cap or changing its window also needs opens paused. Each
   position keeps the fee, haircut and maintenance it was opened with. `rearm` (after a real gap
@@ -105,9 +107,8 @@ market's deployer while the book is thin, and retired once it is deep enough.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
   guard, and the optimizer on (23.5 KB runtime, under the 24 KB limit: 550 bytes left).
 
-Design, replay results and competitors: `docs/design.md` (Japanese).
-When to retire the pool (graduation criteria, a deadline, stop conditions, what stays
-undecided with the operator): `docs/graduation.md` (Japanese, a draft until an operator signs on).
+When to retire the pool (graduation criteria, a deadline, stop conditions) is still a draft, to be
+settled with an operator; it is not published here.
 
 ## Layout
 - `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (65 tests, including regressions for review
@@ -176,8 +177,8 @@ the queue has stopped new positions; your queued winnings are listed with a Rece
   Cancel stay in view, and inputs are 16 px so iOS Safari does not zoom (checked at 390 px).
 
 ## Review
-Codex reviews each change that moves money, and proves each finding with a PoC test before it is
-fixed (PoCs live in throwaway worktrees, not in this repo).
+Each change that moves money gets an internal review by Codex (not an audit). Each finding was
+reproduced with a PoC test before it was fixed (PoCs live in throwaway worktrees, not in this repo).
 
 | Round | Verdict | Findings |
 |---|---|---|
@@ -194,7 +195,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 | 8, 8b (keeper) | CHANGES | the 30% gas padding could pass the 2M small-block cap (root cause: the unbounded debt-queue loop), no budget across RPC requests, transport retries, poke before liquidate. Fixed in 5641c9b and d5d9a52; the loop itself in round 9 |
 | 9 (d1208dd) | CHANGES | pauser role and the O(1) debt queue: contract checked and cleared (FIFO, no over- or under-payment, unclaimed money outside redemption and minting, a blocked winner no longer stops settles, nothing queue-length-dependent in settle, liquidate, redeem or claim). Two keeper findings: an empty RPC answer looked like an old pool and stuck; a claim that always reverts starved debts past the 50-entry scan. Fixed in 1f1e34c (`POOL_ABI=v1` explicit; rotating scan) |
 | 9b, 9c (keeper) | CHANGES, CHANGES | claims only: the scan position lived in the process, so restarts every tick (then restarts at a cadence that resonated with a clock-derived start) never got past a head claim that always fails; `CLAIMS_PER_TICK=0` stopped claims. Fixed in 96bdea4 and the next commit: knobs validated, random start per process, a wrap to the front within the tick. `keeper/claims.test.mjs` runs the real `sendClaims` through those cases. Not re-reviewed: no HIGH, and `claim(id)` is open to anyone, so a stuck keeper delays a winner but cannot keep the money from them |
-| 10–10c (ca11829, f4a0b89, 598a278) | CHANGES ×3 | a full arithmetic audit of every expression. Freezes only at price scales HL never uses (szDecimals above 6: PnL, haircut and equity products overflow) or after a share price driven toward zero overflowed the share count; fees, haircuts, maintenance and losses could round a base unit toward the trader. Fixed: szDecimals ≤ 6 checked at deploy, a mint that would pass `MAX_SHARES` (2^128) first divides every holding by 2^64, lazily (round 10b: skipping the rebate handed it to holders; 10c: owing it as cash made it senior and reopened washing), those four round in the pool's favor (`test_r10_arithmeticLimits`). Left as is: at most one base unit of pool-favoring dust per position, mint or redemption |
+| 10–10c (ca11829, f4a0b89, 598a278) | CHANGES ×3 | an internal arithmetic review of every expression. Freezes only at price scales HL never uses (szDecimals above 6: PnL, haircut and equity products overflow) or after a share price driven toward zero overflowed the share count; fees, haircuts, maintenance and losses could round a base unit toward the trader. Fixed: szDecimals ≤ 6 checked at deploy, a mint that would pass `MAX_SHARES` (2^128) first divides every holding by 2^64, lazily (round 10b: skipping the rebate handed it to holders; 10c: owing it as cash made it senior and reopened washing), those four round in the pool's favor (`test_r10_arithmeticLimits`). Left as is: at most one base unit of pool-favoring dust per position, mint or redemption |
 | 11–11f (9effddc … 7ca577c) | CHANGES ×5, APPROVE | the backing check and `seed`. 11: the first bound (equity's) let a long far past its margin offset another long's win, and `stressMoveBps` could be set to 0 by proposal; fixed with `profitBound` (entry extremes, no netting, also used by `equity()`) and a 5% floor off local chains. 11b: both cleared; keeper retries of unbacked opens came due together, now jittered, at most `OPENS_PER_TICK` (5) a tick, in ticket order (a ticket when first seen, a fresh one each try), and due again when a close or liquidation makes room (11c: clearing the backoff starved later opens; 11d: "never tried first" starved a retried open under arrivals; 11e: new tickets followed the reshuffled active list, now id order). Left as is: the keeper still reads every active position each tick, so a very large active set grows each read |
 | 12, 12b (1ed0730, 7aaa45a) | CHANGES, APPROVE | the page: payable now, the queue and its oldest wait (`Debt.at`), backing room, queued winnings with Receive. 12: the room left out the re-pricing when a new position becomes its side's entry extreme ($100,500 shown where $23,576 fits); now computed as the contract does (`web/room.ts`, `web/room.test.mjs`, `test_r12_roomMatchesBacking`); the claims table is labelled as the newest 200 entries; queue reads are cached; a legacy pool says it has no backing check |
 | 13, 13b, 13c (56fc38b, 7326bf6, 5412c35) | CHANGES, CHANGES, APPROVE | halted or delisted market. 13: a live spell between two same-oracle sightings was invisible (HIGH) → sightings at most `FROZEN_GAP` apart; `applyEnd` took any operator price without a reference → the oracle must sit at it; the keeper broke on pools from just before this change → `POOL_ABI=v2`; its empty-book test was weaker than the guard's. 13b: a long drain could outrun the gap, and a non-halted rejected book did not clear the clock (keeper). 13c: no findings |
@@ -202,7 +203,7 @@ fixed (PoCs live in throwaway worktrees, not in this repo).
 ## Not done
 Moving the testnet keeper to an always-on host with `deploy/cohost/` (round 6 closed; it runs
 on a local machine until then); KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
-close positions left open after graduation (`docs/graduation.md`, to settle with an operator);
+close positions left open after graduation (to settle with an operator);
 whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
 exact instead of assumed, at the cost of capped wins (as [hyperevm-perp](https://github.com/psyto/hyperevm-perp) does);
 the independent reference (`maxRefOracleBps` is 0 on testnet; `PythRef` needs Hermes update data,

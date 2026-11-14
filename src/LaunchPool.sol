@@ -15,7 +15,7 @@ interface IRefSource {
 }
 
 /// @notice Loss-funded counterparty pool for one HIP-3 perp while its book is thin
-/// (docs/design.md). Run by the market's deployer.
+/// (README, "How the pool works"). Run by the market's deployer.
 ///
 /// - Starts empty. Traders' losses and fees fill it. Losers get pool shares worth `rebateBps` of
 ///   their loss; winners give up `winHaircutBps` of their profit. Keeping rebate < haircut is

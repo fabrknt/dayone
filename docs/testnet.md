@@ -5,9 +5,8 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 ## Current deployment (2026-11-14, master 0682d50: backing check, seed, pauser, claim, halted-market exits)
 - Pool `0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25`, mock USDC `0x86b193FF3f722A5a392C8917d6428337cdB91546`
   (xyz:TSLA, the testnet defaults below), seeded with 10,000 mock USDC (`SEED=10000`).
-  Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet, in
-  `the operator key file`, mode 600, with the `0x` prefix). Pauser and keeper
-  `0xD0B64bc5D46E903f2228cc861006Ed4A92BbF547` (`the keeper key file`): it can set and clear
+  Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet). Pauser
+  and keeper `0xD0B64bc5D46E903f2228cc861006Ed4A92BbF547` (its own key): it can set and clear
   the trading-hours pause and nothing else, and it sends from a different address than the operator,
   so it does not share nonces with anything the operator key still runs.
 - Page: `?net=testnet&pool=0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25&usdc=0x86b193FF3f722A5a392C8917d6428337cdB91546`.
@@ -81,27 +80,40 @@ oracle. `DeployTestnet` therefore turns off the mark/mid bounds; the jump latch,
 settlement and both caps stay on. Other markets: `DEX=… INDEX=… SZ_DECIMALS=…`.
 
 ## Steps (the key holder runs 1, 2 and 3)
-1. A fresh key with testnet HYPE on HyperEVM for gas (send from HyperCore testnet spot to the
-   EVM, or a faucet). About 5.1M gas in all (forge's estimate for `DeployTestnet`, 10-20) at 0.2 gwei.
+Needs, besides the Quick start's tools, [uv](https://docs.astral.sh/uv/) for step 2. Keep each key in
+a file only you can read (64 hex characters, with or without `0x`):
+
+    export RPC=https://rpc.hyperliquid-testnet.xyz/evm
+    export KEY_FILE=~/.dayone-operator.key        # the operator (deployer) key
+    export KEEPER_KEY_FILE=~/.dayone-keeper.key   # the keeper's key, which is also the pauser
+    export KEY=$(cat $KEY_FILE) PAUSER=$(cast wallet address --private-key $(cat $KEEPER_KEY_FILE))
+
+1. Both keys need testnet HYPE on HyperEVM for gas (send from HyperCore testnet spot to the EVM, or
+   a faucet); the operator's address also needs a HyperCore account for step 2 (send it a little
+   HYPE from the EVM to `0x2222…2222`, as above). About 5.1M gas in all (forge's estimate for
+   `DeployTestnet`, 10-20) at 0.2 gwei; 0.03 HYPE is plenty for the keeper.
 2. Turn on big blocks for that address. LaunchPool's initcode is 24.6 KB with the optimizer (22.0 KB
    runtime), over the 2M small-block limit. This is a HyperCore action signed by the same key:
    `{"type": "evmUserModify", "usingBigBlocks": true}` (hyperliquid-python-sdk:
-   `Exchange.use_big_blocks(True)`; or `script/big_blocks.py on`, which skips the SDK's metadata
-   load because the SDK fails to parse testnet's spot list). Turn it off after deploying
-   (`script/big_blocks.py off`): while on, every EVM transaction from the address waits for a big
-   block, about one a minute.
-3. `forge script script/DeployTestnet.s.sol --rpc-url https://rpc.hyperliquid-testnet.xyz/evm --broadcast --private-key $KEY`
-   It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
+   `Exchange.use_big_blocks(True)`), or with the script here, which skips the SDK's metadata load
+   because the SDK fails to parse testnet's spot list and reads the key from `KEY_FILE`:
+
+       uv run --with hyperliquid-python-sdk python -I script/big_blocks.py on
+
+   Turn it off after deploying (the same command with `off`): while on, every EVM transaction from
+   the address waits for a big block, about one a minute.
+3. `forge script script/DeployTestnet.s.sol --rpc-url $RPC --broadcast --legacy --slow --private-key $KEY`
+   (`PAUSER` from the exports makes the keeper's key the pauser; `SEED` changes the seed). It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
    position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K,
    `stressMoveBps` 10%, and a seed of `SEED` mock USDC (default 10,000, minted to the deployer and
    paid in for shares), which backs about $100K of longs and, separately, $100K of shorts
    (each side gross). How to choose these for another market: `docs/sizing.md`.
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
-   run the keeper: `RPC_URL=https://rpc.hyperliquid-testnet.xyz/evm POOL=$POOL PRIVATE_KEY=$KEY MARKET_HOURS=nyse node keeper/keeper.ts`.
-   For the current deployment (0x183A…, deployed before the pauser role and `claim()`) add
-   `POOL_ABI=v1`: the keeper then uses `setOpensPaused` with the operator key, and settle pays
-   queued winners itself. `deploy/cohost/bundle.sh` writes it into `keeper.env`.
+   run the keeper with its own key: `RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$(cat $KEEPER_KEY_FILE) MARKET_HOURS=nyse node keeper/keeper.ts`.
+   Only for the 10-18 pool (0x183A…, deployed before the pauser role and `claim()`): add
+   `POOL_ABI=v1`, and the keeper then uses `setOpensPaused` with the operator key, and settle pays
+   queued winners itself. `deploy/cohost/bundle.sh` writes `POOL_ABI` into `keeper.env`.
    `MARKET_HOURS=nyse` pauses new positions while NYSE is closed; use `krx` for xyz:SKHX or xyz:SMSN.
    That needs the pool's pauser key (`PAUSER=<keeper address>` at step 3, or later
    `cast send $POOL "setPauser(address)" <keeper address>` from the operator key) or the operator key.

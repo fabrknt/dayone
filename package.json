@@ -7,8 +7,5 @@
   },
   "dependencies": {
     "viem": "2.57.7"
-  },
-  "optionalDependencies": {
-    "prebell": "github:fabrknt/prebell#cbd4dd7"
   }
 }

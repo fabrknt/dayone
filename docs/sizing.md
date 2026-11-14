@@ -6,7 +6,7 @@ USDC as collateral and the mark, mid and reference bounds off (the testnet book 
 oracle); a real deployment needs real collateral and those bounds on (section 5). This page says
 where each number comes from. Every number below is a starting point to check against your own
 book, not a guarantee. The method and data behind them are in hl-price-guard's
-`docs/safe-limits.md`.
+`lib/hl-price-guard/docs/safe-limits.md`.
 
 ## 1. Settlement cap per minute: from the book's depth
 `capPerWindow` over `capWindow` (60 s) bounds how much notional can settle in any minute, opens
@@ -18,7 +18,7 @@ bound: safe-limits §4); choosing the oracle over the book's price cut the take 
 
 `depth10` is the depth within 10 bp of mid on the thinner side of the book (take a low percentile,
 p10, since a push picks a thin moment) and `k` a safety factor (3 in the examples). Measure your
-market with hl-price-guard's `measure/safe_caps.py`; safe-limits §4 has a table for the xyz markets
+market with hl-price-guard's `lib/hl-price-guard/measure/safe_caps.py`; safe-limits §4 has a table for the xyz markets
 (xyz:TSLA came to about $30K–50K a minute in October 2026). 0.27 rests on one incident on one asset,
 so leave margin.
 
@@ -51,7 +51,7 @@ position's profit at notional × `stressMoveBps` makes the backing exact.
 a `rearm`: wide enough that ordinary updates never trip it, narrow enough that a bad update like
 SK Hynix's (2026-07-27, `cases/skhx-20260727` in hl-price-guard) does. On xyz the deployer's oracle
 moved at most 66 bp within 90 s in our sample (safe-limits §3), so 200 bp is a first estimate.
-There is no script yet that measures this per market: `measure/normal_gaps.py` reports
+There is no script yet that measures this per market: `lib/hl-price-guard/measure/normal_gaps.py` reports
 mark–oracle, mid–oracle and the spread, not the oracle's own steps.
 
 ## 4. Fees, haircut and rebate
@@ -62,7 +62,7 @@ between a 0.25% and a 1% move) follow Papertrade's curve.
 ## 5. Price bounds and an independent reference
 `maxMarkOracleBps`, `maxMidOracleBps` and `maxSpreadBps` reject a read when HL's own prices
 disagree. Set each 2–3 times above its normal maximum on your market (safe-limits §2,
-`measure/normal_gaps.py`; xyz:TSLA's mid–oracle p99 was 38.5 bp in the opening hour).
+`lib/hl-price-guard/measure/normal_gaps.py`; xyz:TSLA's mid–oracle p99 was 38.5 bp in the opening hour).
 
 They cannot catch a wrong oracle, because on HIP-3 one deployer posts it and the book follows.
 That needs `maxRefOracleBps` against a price from outside Hyperliquid, updated in the same
