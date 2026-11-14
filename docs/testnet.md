@@ -2,27 +2,40 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
-## Current deployment (2026-10-18, dedicated key, with the haircut curve)
-- Pool `0x183AA811bFc913fCf5630cbAA4B85b3a8499a707`, mock USDC `0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`
-  (xyz:TSLA, the testnet defaults below). Deployed and operated by a key used only for Day One
-  testnet (operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9`), in `the operator key file`
-  (mode 600, with the `0x` prefix). Its HyperCore account was created by sending 0.05 HYPE from the
-  EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be turned on after.
-- This pool predates the backing check, `seed`, the pauser role and `claim()` (keeper
-  `POOL_ABI=v1`; the page says it has no backing check). The next step is to redeploy the current contract
-  and run it once as an operator would, following the README from the top. The operator above was
-  funded from the founder's earlier deployer address, so the pool links to it on chain; the founder
-  accepted that on 2026-11-07, so the same dedicated key can be reused.
-- Earlier pools, abandoned (test positions closed, about $0.20 of mock-USDC fees left in each):
-  `0x7103…d6D6` (curve, previous key) and `0x372E…9040` (flat haircut).
-- First run: `poke` with the real precompiles, then a $200 long requested and settled by the
-  keeper at 373.42, the same oracle the HL API reported. On the new pool the position stores the
+## Current deployment (2026-11-14, master 0682d50: backing check, seed, pauser, claim, halted-market exits)
+- Pool `0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25`, mock USDC `0x86b193FF3f722A5a392C8917d6428337cdB91546`
+  (xyz:TSLA, the testnet defaults below), seeded with 10,000 mock USDC (`SEED=10000`).
+  Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet, in
+  `the operator key file`, mode 600, with the `0x` prefix). Pauser and keeper
+  `0xD0B64bc5D46E903f2228cc861006Ed4A92BbF547` (`the keeper key file`): it can set and clear
+  the trading-hours pause and nothing else, and it sends from a different address than the operator,
+  so it does not share nonces with anything the operator key still runs.
+- Page: `?net=testnet&pool=0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25&usdc=0x86b193FF3f722A5a392C8917d6428337cdB91546`.
+- First run (2026-11-14, a Friday evening in New York): a $200 long (20 USDC at 10x) was requested
+  as position 1, and the keeper refused to settle it: `Breach Spread: 3215 over 100`. The testnet
+  book had a 378.38 bid and a single 500 ask (oracle 380.96), a 28% spread against the 1% bound. That
+  is the guard doing its job on a broken book; the keeper keeps trying and settles when the spread
+  comes back under the bound.
+- The operator was funded from the founder's earlier deployer address, so the pool links to it on
+  chain; the founder accepted that on 2026-11-07. Its HyperCore account was created by sending
+  0.05 HYPE from the EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be
+  turned on after.
+
+## Earlier deployments
+- `0x183AA811bFc913fCf5630cbAA4B85b3a8499a707` (2026-10-18, mock USDC `0x19B4…d1C4`): before the
+  backing check, `seed`, the pauser role and `claim()` (keeper `POOL_ABI=v1`). Its keeper on the
+  always-on host still drives it with the operator key; retire it there before moving that keeper
+  to the new pool.
+- Abandoned (test positions closed, about $0.20 of mock-USDC fees left in each): `0x7103…d6D6`
+  (curve, previous key) and `0x372E…9040` (flat haircut).
+- First run on the 10-17/10-18 pools: `poke` with the real precompiles, then a $200 long requested and settled by the
+  keeper at 373.42, the same oracle the HL API reported. On the 10-18 pool the position stores the
   curve (30% -> 15%, 0.25% -> 1%) and the 12% rebate; `haircutAt` at a 1.76% move gives 15%.
-- Gas: on the new pool viem's exact estimate ran a settle out of gas (285,766 of 285,766) and the
+- Gas: on the 10-18 pool viem's exact estimate ran a settle out of gas (285,766 of 285,766) and the
   keeper logged it as ok. The keeper now adds 30% to the estimate and treats only a receipt with
   status success as done (anything else is logged REVERTED). The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
-- Page: `?net=testnet&pool=0x183AA811bFc913fCf5630cbAA4B85b3a8499a707&usdc=0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`.
+- Its page: `?net=testnet&pool=0x183AA811bFc913fCf5630cbAA4B85b3a8499a707&usdc=0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`.
 - Keeper host: moving from a local machine to an existing always-on host as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
