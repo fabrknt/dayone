@@ -32,18 +32,20 @@ const TESTNET: Omit<Config, "pool" | "usdc"> = {
   market: "xyz:TSLA (HyperEVM testnet)",
 };
 
-/// ?net=testnet&pool=0x..&usdc=0x.. for testnet; else config.json next to the page (a hosted copy);
-/// else the local playground's public/local.json.
+/// A hosted build (VITE_HOSTED=1) uses only config.json next to the page: no query overrides, so a
+/// shared link cannot point the page at another pool, and no devKey, so it never signs with a key it
+/// ships. Otherwise: ?net=testnet&pool=0x..&usdc=0x.. for testnet, else the local playground's
+/// public/local.json.
 export async function loadConfig(): Promise<Config> {
+  if (import.meta.env.VITE_HOSTED === "1") {
+    const hosted = await readJson("config.json");
+    if (!hosted) throw new Error("This page has no config.json, so it does not know which pool to show.");
+    const { devKey: _ignored, ...c } = hosted as Config;
+    return c;
+  }
   const q = new URLSearchParams(location.search);
   if (q.get("net") === "testnet") {
     return { ...TESTNET, pool: q.get("pool") as Address, usdc: q.get("usdc") as Address };
-  }
-  const hosted = await readJson("config.json");
-  if (hosted) {
-    // a hosted page never signs with a key it ships: devKey is dropped
-    const { devKey: _ignored, ...c } = hosted as Config;
-    return c;
   }
   const r = await fetch("/local.json", { cache: "no-store" });
   if (!r.ok) throw new Error("No local playground found. Run ./keeper/dev.sh, or open ?net=testnet&pool=…&usdc=…");

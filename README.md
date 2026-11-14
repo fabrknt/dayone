@@ -173,10 +173,14 @@ the queue has stopped new positions; your queued winnings are listed with a Rece
   `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.
 - Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet. The current deployment's
   addresses are in `docs/testnet.md`.
-- Hosted: `npx vite build --base ./` and put a `config.json` (`rpc`, `chainId`, `pool`, `usdc`,
-  `market`) next to `index.html`; the page reads it when there are no query parameters, ignoring any
-  `devKey`. Reading needs no wallet; trading still does. It reads the pool in one Multicall3 call
-  every 5 s (the public testnet RPC rejects bursts) and says so when a read fails.
+- Hosted: `VITE_HOSTED=1 npx vite build --base ./` and put a `config.json` (`rpc`, `chainId`, `pool`,
+  `usdc`, `market`) next to `index.html`. A hosted build reads only that file: query parameters are
+  ignored (a shared link cannot point it at another pool), any `devKey` is dropped, it shows nothing
+  without the file, and it ships no `public/` (whose `local.json` holds the anvil dev key). Reading
+  needs no wallet; trading still does, and approves only the amount each open needs.
+- Reads go through Multicall3 at its canonical address (on HyperEVM testnet, and put there on anvil
+  by `dev.sh` and `e2e.sh`): a refresh every 5 s is a handful of requests instead of about 25 in
+  parallel, which the public testnet RPC rejects. A failed read is shown on the page.
 - Phone width: under 480 px the positions table drops its id and entry columns so Close and
   Cancel stay in view, and inputs are 16 px so iOS Safari does not zoom (checked at 390 px).
 

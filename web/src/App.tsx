@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { maxUint256, type Address, type PublicClient, type WalletClient } from "viem";
+import { type Address, type PublicClient, type WalletClient } from "viem";
 import { backingRoom } from "./room";
 import { loadConfig, makeClients, poolAbi, legacyPoolAbi, usdcAbi, readMarket, why, type Config, type Market } from "./chain";
 
@@ -183,7 +183,7 @@ export default function App() {
 
   const open = async () => {
     if (!cfg || !me) return;
-    if (me.allowance < marginUnits + fee && !(await tx("Approving", cfg.usdc, usdcAbi, "approve", [cfg.pool, maxUint256]))) return;
+    if (me.allowance < marginUnits + fee && !(await tx("Approving", cfg.usdc, usdcAbi, "approve", [cfg.pool, marginUnits + fee]))) return;
     if (await tx("Requesting", cfg.pool, poolAbi, "requestOpen", [long, marginUnits, lev])) {
       setNote(`Requested. It settles at the oracle after ${pool?.settleDelay ?? 3n} s, when the keeper next runs.`);
     }
