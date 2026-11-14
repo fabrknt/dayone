@@ -32,15 +32,31 @@ const TESTNET: Omit<Config, "pool" | "usdc"> = {
   market: "xyz:TSLA (HyperEVM testnet)",
 };
 
-/// ?net=testnet&pool=0x..&usdc=0x.. for testnet; otherwise the local playground's public/local.json.
+/// ?net=testnet&pool=0x..&usdc=0x.. for testnet; else config.json next to the page (a hosted copy);
+/// else the local playground's public/local.json.
 export async function loadConfig(): Promise<Config> {
   const q = new URLSearchParams(location.search);
   if (q.get("net") === "testnet") {
     return { ...TESTNET, pool: q.get("pool") as Address, usdc: q.get("usdc") as Address };
   }
+  const hosted = await readJson("config.json");
+  if (hosted) {
+    // a hosted page never signs with a key it ships: devKey is dropped
+    const { devKey: _ignored, ...c } = hosted as Config;
+    return c;
+  }
   const r = await fetch("/local.json", { cache: "no-store" });
   if (!r.ok) throw new Error("No local playground found. Run ./keeper/dev.sh, or open ?net=testnet&pool=…&usdc=…");
   return r.json();
+}
+
+async function readJson(url: string): Promise<unknown | null> {
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    return r.ok ? await r.json() : null; // a dev server's HTML fallback fails to parse and counts as absent
+  } catch {
+    return null;
+  }
 }
 
 export function makeChain(c: Config): Chain {
@@ -49,12 +65,16 @@ export function makeChain(c: Config): Chain {
     name: c.chainId === 998 ? "HyperEVM testnet" : "Local",
     nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
     rpcUrls: { default: { http: [c.rpc] } },
+    // the canonical Multicall3 (keeper/dev.sh and e2e.sh put the same code there on anvil)
+    contracts: { multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" } },
   });
 }
 
 export function makeClients(c: Config): { pub: PublicClient; wallet: () => Promise<WalletClient> } {
   const chain = makeChain(c);
-  const pub = createPublicClient({ chain, transport: http(c.rpc) }) as PublicClient;
+  // One multicall per refresh instead of ~20 parallel reads: the public testnet RPC rejects bursts,
+  // and a rejected request without CORS headers reaches the page only as "HTTP request failed".
+  const pub = createPublicClient({ chain, transport: http(c.rpc), batch: { multicall: { wait: 16 } } }) as PublicClient;
   const wallet = async () => {
     if (c.devKey) return createWalletClient({ chain, account: privateKeyToAccount(c.devKey), transport: http(c.rpc) });
     const eth = (window as any).ethereum;

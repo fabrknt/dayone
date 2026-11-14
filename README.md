@@ -173,6 +173,10 @@ the queue has stopped new positions; your queued winnings are listed with a Rece
   `echo 0.85 > /tmp/dayone-shock` replays an SK Hynix-style bad update: the page shows the pause.
 - Testnet: `?net=testnet&pool=0x…&usdc=0x…` with a browser wallet. The current deployment's
   addresses are in `docs/testnet.md`.
+- Hosted: `npx vite build --base ./` and put a `config.json` (`rpc`, `chainId`, `pool`, `usdc`,
+  `market`) next to `index.html`; the page reads it when there are no query parameters, ignoring any
+  `devKey`. Reading needs no wallet; trading still does. It reads the pool in one Multicall3 call
+  every 5 s (the public testnet RPC rejects bursts) and says so when a read fails.
 - Phone width: under 480 px the positions table drops its id and entry columns so Close and
   Cancel stay in view, and inputs are 16 px so iOS Safari does not zoom (checked at 390 px).
 

@@ -152,7 +152,7 @@ export default function App() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 2000);
+    const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -202,6 +202,7 @@ export default function App() {
   return (
     <div className="shell">
       <Header market={cfg.market} />
+      {err && <div className="card warn">Could not read the pool: {err}</div>}
 
       <section className="ticker card">
         <div>
