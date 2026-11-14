@@ -2,7 +2,7 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
-## Current deployment (2026-11-14, master 0682d50: backing check, seed, pauser, claim, halted-market exits)
+## Current deployment (2026-11-14, master 611e92e: backing check, seed, pauser, claim, halted-market exits)
 - Pool `0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25`, mock USDC `0x86b193FF3f722A5a392C8917d6428337cdB91546`
   (xyz:TSLA, the testnet defaults below), seeded with 10,000 mock USDC (`SEED=10000`).
   Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet). Pauser

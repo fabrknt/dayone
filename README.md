@@ -7,8 +7,10 @@ retired once the book is deep enough. Each limit is checked against the replay o
 not proven in general. The operator runs it; Fabrknt does not.
 
 Status: an unaudited reference implementation, deployed only on HyperEVM testnet (against xyz:TSLA,
-`docs/testnet.md`). Not for production funds. Not offered to traders. Part of Fabrknt for HIP-3
-(fabrknt.com/hip3/labs/day-one).
+`docs/testnet.md`), its keeper on an always-on host. Not for production funds. Not offered to
+traders. Part of Fabrknt for HIP-3 (fabrknt.com/hip3/labs/day-one). Watch the testnet pool with no
+wallet: [fabrknt.com/hip3/labs/day-one/app](https://fabrknt.com/hip3/labs/day-one/app/index.html)
+(prices, the price check's verdict, what the pool can pay).
 
 | You want to | Where |
 |---|---|
@@ -18,7 +20,8 @@ Status: an unaudited reference implementation, deployed only on HyperEVM testnet
 | Run the keeper (settle, liquidate, claim, poke) | `keeper/keeper.ts`; always-on: `deploy/cohost/` |
 | Pause outside the stock's trading hours or during a halt | `MARKET_HOURS=nyse\|krx`; `PRIMARY_HALTS=<symbol>` needs `prebell`, which is not public yet |
 | End a halted or delisted market | `noteFrozen`, `proposeEnd` / `applyEnd` (below) |
-| Show traders the pool | `web/` |
+| Show traders the pool | `web/`; hosted read-only build: "Web UI" below |
+| Watch the testnet pool now | [fabrknt.com/hip3/labs/day-one/app](https://fabrknt.com/hip3/labs/day-one/app/index.html) (no wallet) |
 | Know why each rule exists | "How the pool works" below and the Review table |
 
 ## Quick start
@@ -207,6 +210,8 @@ reproduced with a PoC test before it was fixed (PoCs live in throwaway worktrees
 | 11–11f (9effddc … 7ca577c) | CHANGES ×5, APPROVE | the backing check and `seed`. 11: the first bound (equity's) let a long far past its margin offset another long's win, and `stressMoveBps` could be set to 0 by proposal; fixed with `profitBound` (entry extremes, no netting, also used by `equity()`) and a 5% floor off local chains. 11b: both cleared; keeper retries of unbacked opens came due together, now jittered, at most `OPENS_PER_TICK` (5) a tick, in ticket order (a ticket when first seen, a fresh one each try), and due again when a close or liquidation makes room (11c: clearing the backoff starved later opens; 11d: "never tried first" starved a retried open under arrivals; 11e: new tickets followed the reshuffled active list, now id order). Left as is: the keeper still reads every active position each tick, so a very large active set grows each read |
 | 12, 12b (1ed0730, 7aaa45a) | CHANGES, APPROVE | the page: payable now, the queue and its oldest wait (`Debt.at`), backing room, queued winnings with Receive. 12: the room left out the re-pricing when a new position becomes its side's entry extreme ($100,500 shown where $23,576 fits); now computed as the contract does (`web/room.ts`, `web/room.test.mjs`, `test_r12_roomMatchesBacking`); the claims table is labelled as the newest 200 entries; queue reads are cached; a legacy pool says it has no backing check |
 | 13, 13b, 13c (56fc38b, 7326bf6, 5412c35) | CHANGES, CHANGES, APPROVE | halted or delisted market. 13: a live spell between two same-oracle sightings was invisible (HIGH) → sightings at most `FROZEN_GAP` apart; `applyEnd` took any operator price without a reference → the oracle must sit at it; the keeper broke on pools from just before this change → `POOL_ABI=v2`; its empty-book test was weaker than the guard's. 13b: a long drain could outrun the gap, and a non-halted rejected book did not clear the clock (keeper). 13c: no findings |
+| Pre-publication r1, r2 (f630361, b7f83cc) | CHANGES, CHANGES (resolved) | before the repo went public on 2026-11-14 (`docs/reviews/prepublic-r1.md`, `-r2.md`): internal design notes removed from all history, local paths and key-file names scrubbed, claims scoped to the named replays and tests (an internal review, not an audit), `prebell` out of `package.json` so a fresh clone installs from public sources only, `NOTICE`, copy-pasteable testnet steps. Checked with a fresh clone: `npm run demo` all ok without `prebell` |
+| Web hosted r1, r2 (23b33d1, e5ab7ed) | CHANGES, CHANGES (resolved) | the hosted read-only view (`docs/reviews/web-hosted-r1.md`, `-r2.md`): a hosted build reads only its `config.json` (no query override, no dev key, no `public/`), approvals are the amount an open needs, reads go through Multicall3 (r1's "not on testnet" was wrong: code size 3,808 on chain 998, output kept in r2) |
 
 ## Not done
 KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to

@@ -1,5 +1,7 @@
 # Pre-publication re-review (r2) — `dcda128`
 
+> Commit ids below are from before the second history rewrite (key-file names, 2026-11-14). The reviewed fixes are now `f630361`; this review was committed as `b7f83cc`.
+
 Scope: `testnet-v2-1114` at `dcda128`, the complete reachable patch history
 (`git log --all -p`), and a new clone of this branch. The accepted author email
 and the accepted on-chain link from the operator to the owner's earlier address

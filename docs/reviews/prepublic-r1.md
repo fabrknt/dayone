@@ -1,5 +1,7 @@
 # Pre-publication review — 99d88a6
 
+> The history was rewritten after this review (git filter-repo, 2026-11-14), so the commit ids below are from before it. The reviewed tree is now around `c157290`; the fixes are `f630361`.
+
 Scope: requested documents and `git log --all -p` (all reachable history). I found no live private-key value or private IP address. The 64-hex values in the local Anvil scripts are Anvil's published development keys, not deployment keys.
 
 1. **P0 — Reachable history publishes personal identity data and a local username.** `docs/reviews/prebell-halts-r1.md:4`, `docs/reviews/prebell-halts-r1.md:7`, and `docs/reviews/prebell-halts-r1.md:10` contain absolute `/Users/<username>/...` paths. Every reachable commit's author and committer metadata also contain the same personal email address. Removing the current file is insufficient: this needs a history rewrite of every branch/ref intended for publication, followed by a force-push; use an organization/role identity for rewritten commits and verify with a fresh clone plus `git log --all --format=fuller`.
