@@ -121,7 +121,7 @@ settled with an operator; it is not published here.
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
-  The pin is `v0.3.0` (b343536; moved from `v0.2.1` on 2026-11-04 with no contract change); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
+  The pin is `v0.4.1` (edbee7e; moved from `v0.3.0` on 2026-11-14 with no contract change: `forge test` 70 passed, `npm run demo` all ok); `v0.2.0` has a `Rolling.reconfigure` bug. Changes to the library are made
   in that repo; it does not depend on Day One.
 - `prebell` (`fabrknt/prebell`, not public yet, an optional dependency in `package.json` pinned to a commit
   from GitHub; the keeper and `npm run demo` run without it): the keeper's
