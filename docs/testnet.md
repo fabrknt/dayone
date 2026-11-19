@@ -24,6 +24,18 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   (`settle(1)` reverts `Breach(EmptyBook, 0, 0)`), and the keeper sends nothing on an empty book. With an
   ask back and the oracle still at 380.96 against a reference of 391.55, it would stop at
   `RefOracle` (about 270 bp over 150), as it did on anvil with the same prices.
+- If pushes stop (the keeper down, the HL API unreachable, the key out of gas), the reference goes
+  stale after 180 s, and from then on settles (opens and closes), liquidations, `poke`, redemptions,
+  the frozen-book exits and `applyEnd` all revert with `RefStale`, even with no position open. Still
+  possible: `claim`, `cancelOpen`, and on a pool already ended, settling and redeeming at the end
+  price. Recovery: pushes resume, or the operator proposes a new reference or none
+  (`proposeParams`), applied after `paramsDelay` (1 day here); a running keeper follows the change.
+- Freshness is the time the push executed on chain (`updatedAt` is that block's timestamp), not when
+  the price was read from HL nor when HL mainnet's oracle last moved: if that oracle itself stopped,
+  the reference would stay fresh at the stopped price, and a push that waited in the mempool gives
+  the price it carries a fresh 180 s once it lands. The keeper keeps at most one push in flight and
+  sends nothing else meanwhile (HyperEVM's RPC answers nonces at the latest block only), so after a
+  stall at most one such push lands before the next one replaces it.
 - The reference is testnet only and only as good as its reporter: the keeper's key can hold every
   settlement or let a wrong oracle through inside the bound (`src/testnet/ReporterRef.sol`). It is
   not an independent signed price. On mainnet use one (`PythRef`; its update data needs a Hermes API

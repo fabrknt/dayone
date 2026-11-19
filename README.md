@@ -163,8 +163,10 @@ settled with an operator; it is not published here.
   (testnet 0x183A…), `POOL_ABI=v2` for one deployed after them but before the halted-market exits,
   set explicitly rather than guessed from a failed call.
   With `REF_COIN=xyz:TSLA` (testnet only) it first pushes HL mainnet's oracle for that market to the
-  pool's `ReporterRef` once a minute; when pushes stop the reference goes stale and nothing settles.
-  `keeper/e2e.sh` does not cover it yet (checked on anvil and on testnet, `docs/testnet.md`).
+  pool's `ReporterRef` once a minute (it re-reads the pool's reference each time, and a wrong setup
+  or failed push never stops the rest of the tick; while a push is unmined it sends nothing else);
+  when pushes stop the reference goes stale and, until the pool is ended, it refuses every priced
+  action until they resume (`docs/testnet.md`; `keeper/e2e.sh` step 13).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses,
   including a halt (the hour held, then settled at the frozen oracle), an operator end, a `POOL_ABI=v2`
   tick and a one-sided book clearing the clock.
@@ -219,6 +221,7 @@ reproduced with a PoC test before it was fixed (PoCs live in throwaway worktrees
 | 13, 13b, 13c (56fc38b, 7326bf6, 5412c35) | CHANGES, CHANGES, APPROVE | halted or delisted market. 13: a live spell between two same-oracle sightings was invisible (HIGH) → sightings at most `FROZEN_GAP` apart; `applyEnd` took any operator price without a reference → the oracle must sit at it; the keeper broke on pools from just before this change → `POOL_ABI=v2`; its empty-book test was weaker than the guard's. 13b: a long drain could outrun the gap, and a non-halted rejected book did not clear the clock (keeper). 13c: no findings |
 | Pre-publication r1, r2 (f630361, b7f83cc) | CHANGES, CHANGES (resolved) | before the repo went public on 2026-11-14 (`docs/reviews/prepublic-r1.md`, `-r2.md`): internal design notes removed from all history, local paths and key-file names scrubbed, claims scoped to the named replays and tests (an internal review, not an audit), `prebell` out of `package.json` so a fresh clone installs from public sources only, `NOTICE`, copy-pasteable testnet steps. Checked with a fresh clone: `npm run demo` all ok without `prebell` |
 | Web hosted r1, r2 (23b33d1, e5ab7ed) | CHANGES, CHANGES (resolved) | the hosted read-only view (`docs/reviews/web-hosted-r1.md`, `-r2.md`): a hosted build reads only its `config.json` (no query override, no dev key, no `public/`), approvals are the amount an open needs, reads go through Multicall3 (r1's "not on testnet" was wrong: code size 3,808 on chain 998, output kept in r2) |
+| Testnet reference r1–r5 (59f55d5 and the fix after it) | CHANGES ×5 (resolved; one recorded) | `ReporterRef` and the keeper's push (`docs/reviews/testnet-ref.md`): a swapped reference is followed, a wrong setup never stops the rest of the tick, one transaction in flight while a push is unmined (HyperEVM answers nonces at the latest block only), signed before it is broadcast so a lost answer still counts, resolved only by its receipt or its nonce being used, the same bytes broadcast again when a node forgets it. Recorded: a restart while a push is unmined can collide once on its nonce |
 
 ## Not done
 KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond 2027 and other exchanges; audit; mainnet; the graduation criteria's numbers, an on-chain deadline and a way to
@@ -233,7 +236,7 @@ sequences do not halt the book yet); on a market with no reference, a live book 
 `FROZEN_GAP` between two keeper sightings that comes back to exactly the same oracle goes unseen, so
 watch that the keeper is alive.
 
-`forge test` (71 tests); `npm install && npm run demo` (36 checks with `prebell`, 32 without); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+`forge test` (71 tests); `npm install && npm run demo` (49 checks with `prebell`, 45 without; `E2E_PORT` if 8546 is taken); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
 
 ## License
 Apache-2.0 (`LICENSE`).

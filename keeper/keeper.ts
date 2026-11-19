@@ -30,7 +30,7 @@ import { readFileSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import {
   createPublicClient, createWalletClient, http, custom, decodeAbiParameters, encodeAbiParameters,
-  encodeFunctionData, decodeFunctionResult, parseAbi, parseUnits,
+  encodeFunctionData, decodeFunctionResult, parseAbi, parseUnits, keccak256,
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -146,25 +146,36 @@ function why(e: unknown): string {
 /// The limit stays under the 2M small-block cap; work estimated above it needs big blocks and is
 /// logged, not sent. Only a receipt with status success counts as done.
 const SMALL_BLOCK_GAS = 2_000_000n;
-async function send(functionName: string, args: unknown[] = [], to: { address: Address; abi: any; quiet?: boolean } = { address: pool, abi }): Promise<boolean> {
+/// Simulate, estimate and send; the hash, or undefined when the work needs big blocks. Throws on a revert.
+async function write(address: Address, abi: any, functionName: string, args: unknown[]): Promise<Hex | undefined> {
+  const prepared = await prepare(address, abi, functionName, args);
+  return prepared && wallet.writeContract({ ...prepared.request, gas: prepared.gas });
+}
+/// The simulation's request and the padded gas limit; undefined when the work needs big blocks.
+async function prepare(address: Address, abi: any, functionName: string, args: unknown[]) {
+  const { request } = await pub.simulateContract({ account, address, abi, functionName, args });
+  const gas = await pub.estimateContractGas({ account, address, abi, functionName, args });
+  if (gas >= SMALL_BLOCK_GAS) {
+    console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) NEEDS BIG BLOCKS: estimate ${gas}`);
+    return undefined;
+  }
+  const padded = (gas * 13n) / 10n;
+  return { request, gas: padded < SMALL_BLOCK_GAS ? padded : SMALL_BLOCK_GAS - 1n };
+}
+async function send(functionName: string, args: unknown[] = []): Promise<boolean> {
+  // one transaction in flight: HyperEVM's RPC answers nonces at the latest block only, so a second
+  // send while a reference push is unmined would reuse its nonce
+  if (refPending) return false;
   let hash: Hex | undefined;
   try {
-    const { address, abi } = to;
-    const { request } = await pub.simulateContract({ account, address, abi, functionName, args });
-    const gas = await pub.estimateContractGas({ account, address, abi, functionName, args });
-    if (gas >= SMALL_BLOCK_GAS) {
-      console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) NEEDS BIG BLOCKS: estimate ${gas}`);
-      return false;
-    }
-    const padded = (gas * 13n) / 10n;
-    const limit = padded < SMALL_BLOCK_GAS ? padded : SMALL_BLOCK_GAS - 1n;
-    hash = await wallet.writeContract({ ...request, gas: limit });
+    hash = await write(pool, abi, functionName, args);
+    if (!hash) return false;
     const receipt = await pub.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {
       console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) REVERTED on chain ${hash} (gas ${receipt.gasUsed})`);
       return false;
     }
-    if (!to.quiet) console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
+    console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
     return true;
   } catch (e) {
     // a failed receipt read (e.g. the RPC's rate limit) after the send says nothing about the tx:
@@ -255,16 +266,27 @@ async function keepSighting(): Promise<boolean> {
 
 // REF_COIN=xyz:TSLA (testnet only): push HL mainnet's oracle for that market to the pool's
 // ReporterRef (src/testnet/ReporterRef.sol) every REF_PUSH_MS, so a testnet oracle that stops or
-// drifts from it trips the guard. This key must be the ReporterRef's reporter. A failed read or push
-// is retried after 10 s; if pushes stop, the reference goes stale and the pool settles nothing,
-// which is the intended failure.
+// drifts from it trips the guard. This key must be the reference's reporter. The reference is
+// re-read before each push, so one the operator swaps in (proposeParams) is the one pushed.
+// Nothing here stops the rest of the tick: a wrong setup (no reference, another reporter) or a
+// failed read or push is logged and retried, every REF_PUSH_MS or after 10 s, while liquidations,
+// closes and claims go on; anything that needs a fresh reference is refused by the pool itself.
+// A push waits at most REF_WAIT_MS for its receipt. One not mined by then stays pending, and until
+// it is resolved the keeper sends nothing else (one transaction in flight; while the chain is not
+// mining nothing else would land either) and no second push. It is resolved only by its receipt or
+// by its nonce being used (mined, or replaced); never by time, and never by a node saying it does
+// not know the transaction (a lagging node says that too): the same signed bytes are broadcast
+// again instead, at most once a REF_WAIT_MS. A push the node keeps refusing holds the keeper until
+// it is restarted, and says so in the log every time.
 const refCoin = process.env.REF_COIN;
 const REF_API = process.env.REF_API ?? "https://api.hyperliquid.xyz/info";
 const REF_PUSH_MS = intEnv("REF_PUSH_MS", 60_000, 3_600_000);
+const REF_WAIT_MS = intEnv("REF_WAIT_MS", 15_000, 120_000);
 const refAbi = parseAbi(["function push(uint256 price)", "function reporter() view returns (address)"]);
-let refAt: Address | undefined;
-let refPushMs = -Infinity;
-let refPushed = false; // the first push is logged, later ones only when they fail
+let refAt: Address | undefined; // the reference last checked to have this key as its reporter
+let refDueMs = -Infinity; // next push (or retry) not before this
+let refPending: { hash: Hex; nonce: number; signed: Hex; sentMs: number } | undefined;
+let refLogged = false; // the first good push is logged, later ones only when they fail
 
 async function refPrice(): Promise<bigint> {
   const dex = refCoin!.includes(":") ? refCoin!.split(":")[0] : "";
@@ -280,33 +302,114 @@ async function refPrice(): Promise<bigint> {
   return parseUnits(px, 18);
 }
 
+function refMined(hash: Hex, status: string) {
+  if (status !== "success") console.log(`${new Date().toISOString()} reference push REVERTED on chain ${hash}`);
+  else if (!refLogged) console.log(`${new Date().toISOString()} reference push ok ${hash} (later pushes are logged only when they fail)`);
+  refLogged ||= status === "success";
+}
+
+/// Whether the pending push is still unresolved. A read that fails leaves it pending; one the node
+/// does not know is broadcast again, unchanged.
+async function refStillPending(): Promise<boolean> {
+  const p = refPending!;
+  try {
+    const r = await pub.getTransactionReceipt({ hash: p.hash });
+    refMined(p.hash, r.status);
+    return false;
+  } catch {}
+  try {
+    if ((await pub.getTransactionCount({ address: account.address, blockTag: "latest" })) > p.nonce) {
+      console.log(`${new Date().toISOString()} reference push ${p.hash}: nonce ${p.nonce} used, receipt not found`);
+      return false;
+    }
+    await pub.getTransaction({ hash: p.hash });
+    return true;
+  } catch (e) {
+    if (!(e instanceof BaseError && e.name === "TransactionNotFoundError")) return true;
+  }
+  if (Date.now() - p.sentMs < REF_WAIT_MS) return true;
+  p.sentMs = Date.now();
+  try {
+    await wallet.sendRawTransaction({ serializedTransaction: p.signed });
+    console.log(`${new Date().toISOString()} reference push ${p.hash} unknown to the node; broadcast again`);
+  } catch (e) {
+    console.log(`${new Date().toISOString()} reference push ${p.hash} unknown to the node, and broadcasting it again failed: ${why(e)}; other sends stay held`);
+  }
+  return true;
+}
+
 async function pushRef() {
-  if (Date.now() - refPushMs < REF_PUSH_MS) return;
-  if (!refAt) {
+  const t = Date.now();
+  if (refPending) {
+    if (await refStillPending()) return;
+    console.log(`${new Date().toISOString()} reference push ${refPending.hash} resolved; sends resume`);
+    refPending = undefined;
+  }
+  if (t < refDueMs) return;
+  refDueMs = t + 10_000; // a retry, unless this push goes out
+  try {
     const at = (await read("refSource")) as Address;
-    if (BigInt(at) === 0n) throw new Error("REF_COIN is set but the pool has no reference source");
-    const reporter = await pub.readContract({ address: at, abi: refAbi, functionName: "reporter" });
-    if (reporter.toLowerCase() !== account.address.toLowerCase()) throw new Error(`REF_COIN is set but the reference's reporter is ${reporter}, not this key`);
-    refAt = at;
+    if (BigInt(at) === 0n) throw new Error("the pool has no reference source");
+    if (at !== refAt) {
+      const reporter = await pub.readContract({ address: at, abi: refAbi, functionName: "reporter" });
+      if (reporter.toLowerCase() !== account.address.toLowerCase()) throw new Error(`the reference ${at} has reporter ${reporter}, not this key`);
+      if (refAt) console.log(`${new Date().toISOString()} reference changed: ${refAt} -> ${at}`);
+      refAt = at;
+    }
+  } catch (e) {
+    refDueMs = t + REF_PUSH_MS;
+    console.log(`${new Date().toISOString()} REFERENCE NOT PUSHED (REF_COIN=${refCoin}): ${why(e)}`);
+    return;
   }
   let price: bigint;
   try {
     price = await refPrice();
   } catch (e) {
     console.log(`${new Date().toISOString()} reference read failed: ${why(e)}`);
-    refPushMs = Date.now() - REF_PUSH_MS + 10_000;
     return;
   }
-  const ok = await send("push", [price], { address: refAt, abi: refAbi, quiet: refPushed });
-  refPushMs = ok ? Date.now() : Date.now() - REF_PUSH_MS + 10_000;
-  refPushed ||= ok;
+  let hash: Hex;
+  let signed: Hex;
+  let nonce: number;
+  try {
+    const prepared = await prepare(refAt, refAbi, "push", [price]);
+    if (!prepared) return;
+    // signed here, with its nonce fixed, so the hash is known before it is broadcast: a broadcast
+    // whose answer is lost still counts as in flight, and the same bytes can be broadcast again
+    nonce = await pub.getTransactionCount({ address: account.address, blockTag: "latest" });
+    const tx = await wallet.prepareTransactionRequest({
+      account, chain: null, to: refAt, data: encodeFunctionData({ abi: refAbi, functionName: "push", args: [price] }), gas: prepared.gas, nonce,
+    });
+    signed = await wallet.signTransaction(tx as any);
+    hash = keccak256(signed);
+  } catch (e) {
+    console.log(`${new Date().toISOString()} push(${price}) skipped: ${why(e)}`);
+    return;
+  }
+  refDueMs = t + REF_PUSH_MS;
+  try {
+    await wallet.sendRawTransaction({ serializedTransaction: signed });
+  } catch (e) {
+    refPending = { hash, nonce, signed, sentMs: t };
+    console.log(`${new Date().toISOString()} reference push ${hash} broadcast without a clear answer (${why(e)}); holding other sends until it is resolved`);
+    return;
+  }
+  try {
+    const r = await pub.waitForTransactionReceipt({ hash, timeout: REF_WAIT_MS });
+    refMined(hash, r.status);
+  } catch {
+    refPending = { hash, nonce, signed, sentMs: Date.now() };
+    console.log(`${new Date().toISOString()} reference push ${hash} not mined within ${REF_WAIT_MS} ms; holding other sends until it is resolved`);
+  }
 }
 
 async function tick() {
   tickNo++;
   sighting = false;
-  // before the reads, so a settle this tick sees the fresh reference
-  if (refCoin) await pushRef();
+  // before the reads, so a settle this tick sees the fresh reference; it never throws
+  if (refCoin) await pushRef().catch((e) => console.log(`${new Date().toISOString()} reference: ${why(e)}`));
+  // a push still unmined holds every other send (see pushRef); the tick has nothing else to do
+  if (refPending) return;
   // started now, so it overlaps the chain reads; a feed slower than them still delays the tick,
   // liquidations included, by at most its 10 s timeout
   const halts = haltSymbol ? readHalts() : undefined;

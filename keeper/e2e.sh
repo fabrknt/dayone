@@ -4,7 +4,7 @@
 set -e
 set -o pipefail
 cd "$(dirname "$0")/.."
-PORT=8546
+PORT=${E2E_PORT:-8546} # another project's local anvil may already hold 8546
 RPC=http://127.0.0.1:$PORT
 # anvil's well-known dev keys: 0 = operator and keeper, 1 = trader, 2 = pauser (the hours keeper, from step 5)
 K0=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
@@ -15,6 +15,8 @@ P2=$(cast wallet address $K2)
 
 # chain time starts on Fri 2026-10-16 00:00 UTC, so the dated steps below (Sat 10-17, Mon 10-19, ...)
 # are always in the future, whatever day this runs
+# never run against a chain this script did not start (it would set code and move time there)
+if cast chain-id --rpc-url $RPC >/dev/null 2>&1; then echo "port $PORT is already serving a chain: set E2E_PORT"; exit 1; fi
 anvil --port $PORT --timestamp 1792108800 --silent &
 ANVIL=$!
 trap 'kill $ANVIL' EXIT
@@ -245,4 +247,85 @@ check "frozen price noted" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256
 cast send -q --rpc-url $RPC --private-key $K0 0x000000000000000000000000000000000000080e "set(uint32,bytes)" 110001 $(cast abi-encode "f(uint64,uint64)" 0 343005)
 later 3; keeper
 check "cleared on a one-sided book" "$(cast call --rpc-url $RPC $POOL "frozenPx()(uint256)" | cut -d' ' -f1)" 0
+echo "13. REF_COIN with a ReporterRef: a wrong key or a far price holds settlement and nothing else; a swapped reference is followed; an unmined push holds every other send until it is mined"
+# waitfor SECONDS CMD...: until CMD succeeds, failing the run after SECONDS
+waitfor() { local end=$(( SECONDS + $1 )); shift; until "$@"; do [ $SECONDS -lt $end ] || { echo "FAIL timed out waiting for: $*"; exit 1; }; sleep 0.2; done; }
+px 350000
+REFPX=$(mktemp); echo 350.00 > $REFPX
+REFPORT=$((PORT + 52))
+if curl -s -m 2 -o /dev/null http://127.0.0.1:$REFPORT; then echo "port $REFPORT is taken: set E2E_PORT"; exit 1; fi
+node keeper/ref-api.mjs $REFPX $REFPORT & REFAPI=$!
+trap 'kill $ANVIL $REFAPI' EXIT
+refapi_up() { kill -0 $REFAPI && curl -s -m 2 -X POST http://127.0.0.1:$REFPORT | grep -q xyz:TSLA; }
+waitfor 10 refapi_up
+A0=$(cast wallet address $K0)
+OUT=$(DEX=1 INDEX=1 SZ_DECIMALS=3 REPORTER=$A0 forge script script/DeployTestnet.s.sol --rpc-url $RPC --private-key $K0 --broadcast 2>&1)
+POOL=$(echo $OUT | awk '/ pool /{print $2}'); USDC=$(echo $OUT | awk '/ usdc /{print $2}'); REF=$(echo $OUT | awk '/ ref /{print $2}')
+cast send -q --rpc-url $RPC --private-key $K0 $USDC "mint(address,uint256)" $T1 1000000000
+cast send -q --rpc-url $RPC --private-key $K1 $USDC "approve(address,uint256)" $POOL 1000000000
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" true 20000000 10
+later 3
+rkeeper() { RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$1 REF_COIN=xyz:TSLA REF_API=http://127.0.0.1:$REFPORT node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1; sed 's/^[^ ]* /  keeper: /' $LOG; }
+LOG=$(mktemp)
+rkeeper $K1
+grep -q "REFERENCE NOT PUSHED" $LOG && grep -q "settle(1) skipped: Breach RefStale" $LOG && ! grep -q "tick failed" $LOG \
+  && echo "ok   a key that is not the reporter is reported, and the tick goes on" || { echo "FAIL wrong reporter"; exit 1; }
+echo 357.00 > $REFPX; rkeeper $K0
+grep -q "Breach RefOracle: 197 over 150" $LOG && echo "ok   2% from the reference: refused" || { echo "FAIL no RefOracle breach"; exit 1; }
+echo 350.50 > $REFPX; rkeeper $K0
+check "settled within the bound" "$(entry 1)" 350000000000000000000
+# the operator swaps in a new reference (same params and bounds, applied after paramsDelay) under a running keeper
+REF2=$(forge create --rpc-url $RPC --private-key $K0 --broadcast src/testnet/ReporterRef.sol:ReporterRef --constructor-args $A0 180 | awk '/Deployed to/{print $3}')
+RLOG=$(mktemp)
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 REF_COIN=xyz:TSLA REF_API=http://127.0.0.1:$REFPORT REF_PUSH_MS=1000 TICK_MS=200 node --disable-warning=ExperimentalWarning keeper/keeper.ts > $RLOG 2>&1 & KP=$!
+trap 'kill $ANVIL $REFAPI $KP 2>/dev/null' EXIT
+waitfor 30 grep -q "reference push ok" $RLOG
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "$(cast sig 'proposeParams((uint16,uint16,uint16,uint64,uint64,uint256,uint256,uint256,uint16,uint256,uint16,uint16,uint16,uint16,uint16,uint16,uint16),(uint16,uint16,uint16,uint16),address)')$(cast call --rpc-url $RPC $POOL 'getParams()' | cut -c3-)$(cast call --rpc-url $RPC $POOL 'bounds()' | cut -c3-)$(cast abi-encode 'f(address)' $REF2 | cut -c3-)"
+later 86401
+cast send -q --rpc-url $RPC --private-key $K0 $POOL "applyParams()"
+echo 351.00 > $REFPX
+ref2_pushed() { [ "$(cast call --rpc-url $RPC $REF2 'price()(uint256)' | cut -d' ' -f1)" = 351000000000000000000 ]; }
+waitfor 30 ref2_pushed
+kill $KP
+grep "reference changed" $RLOG | sed 's/^[^ ]* /  keeper: /'
+check "the running keeper pushes the swapped-in reference" "$(cast call --rpc-url $RPC $REF2 'price()(uint256)' | cut -d' ' -f1)" 351000000000000000000
+# a due open while the last push is still fresh; mining stops, so the next push stays unmined
+cast send -q --rpc-url $RPC --private-key $K1 $POOL "requestOpen(bool,uint256,uint16)" true 20000000 10
+later 3
+cast rpc --rpc-url $RPC evm_setAutomine false >/dev/null
+RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$K0 REF_COIN=xyz:TSLA REF_API=http://127.0.0.1:$REFPORT REF_PUSH_MS=1000 REF_WAIT_MS=2000 TICK_MS=200 node --disable-warning=ExperimentalWarning keeper/keeper.ts > $RLOG 2>&1 & KP=$!
+waitfor 30 grep -q "holding other sends" $RLOG
+sleep 5 # many ticks, and several REF_PUSH_MS, while the push stays unmined
+pending() { cast rpc --rpc-url $RPC txpool_status | python3 -c "import json,sys;print(int(json.load(sys.stdin)['pending'],16))"; }
+check "one transaction in flight: the push" "$(pending)" 1
+check "no second push" "$(grep -c 'holding other sends' $RLOG)" 1
+check "the due open is not sent behind it" "$(grep -c 'settle(2)' $RLOG)" 0
+# the node forgets the push (as a lagging node would answer): the keeper broadcasts the same bytes again
+H1=$(grep -o "reference push 0x[0-9a-f]* not mined" $RLOG | head -1 | cut -d' ' -f3)
+cast rpc --rpc-url $RPC anvil_dropTransaction $H1 >/dev/null
+waitfor 30 grep -q "$H1 unknown to the node; broadcast again" $RLOG
+check "the same push in flight again, nothing else" "$(pending)" 1
+check "no second push" "$(grep -c 'holding other sends' $RLOG)" 1
+check "the due open is still not sent" "$(grep -c 'settle(2)' $RLOG)" 0
+cast rpc --rpc-url $RPC evm_setAutomine true >/dev/null; cast rpc --rpc-url $RPC evm_mine >/dev/null
+settled2() { [ "$(entry 2)" != 0 ]; }
+waitfor 30 settled2
+kill $KP
+grep -E "holding|unknown|resolved" $RLOG | sed 's/^[^ ]* /  keeper: /'
+check "once the push is mined, the open settles" "$(entry 2)" 350000000000000000000
+# the node takes a push but its answer is lost: the push still counts as in flight until resolved
+LOSE=$(mktemp -u); LOSSPORT=$((PORT + 53))
+if curl -s -m 2 -o /dev/null http://127.0.0.1:$LOSSPORT; then echo "port $LOSSPORT is taken: set E2E_PORT"; exit 1; fi
+node keeper/rpc-lossy.mjs $RPC $LOSSPORT $LOSE & LOSSY=$!
+trap 'kill $ANVIL $REFAPI $LOSSY 2>/dev/null' EXIT
+lossy_up() { kill -0 $LOSSY && cast chain-id --rpc-url http://127.0.0.1:$LOSSPORT >/dev/null 2>&1; }
+waitfor 10 lossy_up
+touch $LOSE
+N0=$(cast nonce --rpc-url $RPC $A0)
+RPC_URL=http://127.0.0.1:$LOSSPORT POOL=$POOL PRIVATE_KEY=$K0 REF_COIN=xyz:TSLA REF_API=http://127.0.0.1:$REFPORT node --disable-warning=ExperimentalWarning keeper/keeper.ts --once > $LOG 2>&1
+sed 's/^[^ ]* /  keeper: /' $LOG | grep -v refreshEntryBounds
+grep -q "broadcast without a clear answer" $LOG && ! grep -qE "refreshEntryBounds|tick failed" $LOG \
+  && echo "ok   a lost broadcast answer holds the rest of the tick" || { echo "FAIL lost broadcast answer"; exit 1; }
+check "the push went through regardless" "$(cast nonce --rpc-url $RPC $A0)" $((N0 + 1))
+rm $LOSE; kill $LOSSY
 echo "all ok"
