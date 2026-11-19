@@ -14,7 +14,11 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   as position 1, and the keeper refused to settle it: `Breach Spread: 3215 over 100`. The testnet
   book had a 378.38 bid and a single 500 ask (oracle 380.96), a 28% spread against the 1% bound. That
   is the guard doing its job on a broken book; the keeper keeps trying and settles when the spread
-  comes back under the bound.
+  comes back under the bound. It did: the keeper settled position 1 on 2026-11-16 at 17:02:40 UTC
+  (a Monday, in NYSE hours) at 380.96 (`Opened(1, 380.96)`, tx `0x64b1…27e8`). As of 2026-11-19 the
+  testnet oracle has not moved from 380.96 since 11-14 while the book trades near 495, and the guard
+  does not notice, because testnet runs with no reference and no mark/mid bound (above). A stuck oracle
+  is what the reference check is for on mainnet.
 - The operator was funded from the founder's earlier deployer address, so the pool links to it on
   chain; the founder accepted that on 2026-11-07. Its HyperCore account was created by sending
   0.05 HYPE from the EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be
