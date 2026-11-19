@@ -2,29 +2,51 @@
 
 Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
 
-## Current deployment (2026-11-14, master 611e92e: backing check, seed, pauser, claim, halted-market exits)
-- Pool `0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25`, mock USDC `0x86b193FF3f722A5a392C8917d6428337cdB91546`
-  (xyz:TSLA, the testnet defaults below), seeded with 10,000 mock USDC (`SEED=10000`).
-  Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet). Pauser
-  and keeper `0xD0B64bc5D46E903f2228cc861006Ed4A92BbF547` (its own key): it can set and clear
-  the trading-hours pause and nothing else, and it sends from a different address than the operator,
-  so it does not share nonces with anything the operator key still runs.
-- Page: `?net=testnet&pool=0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25&usdc=0x86b193FF3f722A5a392C8917d6428337cdB91546`.
-- First run (2026-11-14, a Friday evening in New York): a $200 long (20 USDC at 10x) was requested
-  as position 1, and the keeper refused to settle it: `Breach Spread: 3215 over 100`. The testnet
-  book had a 378.38 bid and a single 500 ask (oracle 380.96), a 28% spread against the 1% bound. That
-  is the guard doing its job on a broken book; the keeper keeps trying and settles when the spread
-  comes back under the bound. It did: the keeper settled position 1 on 2026-11-16 at 17:02:40 UTC
-  (a Monday, in NYSE hours) at 380.96 (`Opened(1, 380.96)`, tx `0x64b1…27e8`). As of 2026-11-19 the
-  testnet oracle has not moved from 380.96 since 11-14 while the book trades near 495, and the guard
-  does not notice, because testnet runs with no reference and no mark/mid bound (above). A stuck oracle
-  is what the reference check is for on mainnet.
+## Current deployment (2026-11-19: the 11-14 pool plus a testnet reference price)
+- Pool `0x4B0d8AB73b2511EbDF9eBE474cf0C5a2a77AD8cD`, mock USDC `0x37e6a38d3237ed78E408B56D00693fA47Db9518E`,
+  reference `0x97e0178aE6F918c9063506a9AF76934a131B9938` (`ReporterRef`, `maxAge` 180 s), xyz:TSLA, the
+  testnet defaults below with `maxRefOracleBps` 150, seeded with 10,000 mock USDC. Deployed with
+  `PAUSER=$KEEPER REPORTER=$KEEPER` (step 3).
+  Operator `0xf3DD600Ddf6C1542Db845b3F65F603b5f011c5f9` (a key used only for Day One testnet). Pauser,
+  reporter and keeper `0xD0B64bc5D46E903f2228cc861006Ed4A92BbF547` (its own key): it can set and clear
+  the trading-hours pause and push the reference, and nothing else, and it sends from a different
+  address than the operator, so it does not share nonces with anything the operator key still runs.
+- Page: `?net=testnet&pool=0x4B0d8AB73b2511EbDF9eBE474cf0C5a2a77AD8cD&usdc=0x37e6a38d3237ed78E408B56D00693fA47Db9518E`.
+- Why: on the 11-14 pool (below) the testnet oracle stopped at 380.96 from 11-14 while HL mainnet's
+  xyz:TSLA oracle moved on (391.26 on 11-19, 264 bp away), and with no reference the guard could not
+  tell. The keeper (`REF_COIN=xyz:TSLA`) now pushes HL mainnet's oracle for the same market every
+  minute, so a testnet oracle more than 1.5% from it makes every settlement wait
+  (`Breach RefOracle`), and a keeper that stops pushing makes them wait too (`Breach RefStale`).
+- First run (2026-11-19): the keeper pushed its first reference (391.21) 14 s after starting and
+  paused opens for NYSE hours; at the open (14:30 UTC) it lifted the pause and a $200 long (20 USDC at
+  10x, from the operator key) was requested as position 1. It has not settled: the book had bids only
+  (495.43 best, no ask), so the guard stops at `EmptyBook` before it reaches the reference
+  (`settle(1)` reverts `Breach(EmptyBook, 0, 0)`), and the keeper sends nothing on an empty book. With an
+  ask back and the oracle still at 380.96 against a reference of 391.55, it would stop at
+  `RefOracle` (about 270 bp over 150), as it did on anvil with the same prices.
+- The reference is testnet only and only as good as its reporter: the keeper's key can hold every
+  settlement or let a wrong oracle through inside the bound (`src/testnet/ReporterRef.sol`). It is
+  not an independent signed price. On mainnet use one (`PythRef`; its update data needs a Hermes API
+  key). HL mainnet's oracle is posted by the same deployer as its book, so for a mainnet pool it would
+  not be independent either; here it only stands in for the price the testnet deployer stopped posting.
 - The operator was funded from the founder's earlier deployer address, so the pool links to it on
   chain; the founder accepted that on 2026-11-07. Its HyperCore account was created by sending
   0.05 HYPE from the EVM to `0x2222…2222` (activation took about 0.024 HYPE); big blocks can only be
   turned on after.
 
 ## Earlier deployments
+- `0x9C1F3e7af3781CA4a7AB8b5E0f4BE81d8063ba25` (2026-11-14, master 611e92e, mock USDC `0x86b1…1546`): the
+  current pool without a reference. Retired on 2026-11-19, when the keeper on the always-on host moved
+  to the current pool; nothing drives it now. Position 1 (the $200 long below) is still open there,
+  owned by `0xa032…aa09`; opens were last paused for NYSE hours.
+  First run (2026-11-14, a Friday evening in New York): a $200 long (20 USDC at 10x) was requested
+  as position 1, and the keeper refused to settle it: `Breach Spread: 3215 over 100`. The testnet
+  book had a 378.38 bid and a single 500 ask (oracle 380.96), a 28% spread against the 1% bound. That
+  is the guard doing its job on a broken book; the keeper keeps trying and settles when the spread
+  comes back under the bound. It did: the keeper settled position 1 on 2026-11-16 at 17:02:40 UTC
+  (a Monday, in NYSE hours) at 380.96 (`Opened(1, 380.96)`, tx `0x64b1…27e8`). As of 2026-11-19 the
+  testnet oracle has not moved from 380.96 since 11-14 while the book trades near 495, and the guard
+  did not notice: that pool has no reference and no mark/mid bound.
 - `0x183AA811bFc913fCf5630cbAA4B85b3a8499a707` (2026-10-18, mock USDC `0x19B4…d1C4`): before the
   backing check, `seed`, the pauser role and `claim()` (keeper `POOL_ABI=v1`). Retired on
   2026-11-14: its keeper on the always-on host was replaced by the current pool's, so nothing drives
@@ -39,8 +61,8 @@ Checked 2026-10-17. Chain 998, RPC `https://rpc.hyperliquid-testnet.xyz/evm`.
   status success as done (anything else is logged REVERTED). The keeper runs with
   `MARKET_HOURS=nyse` and paused new positions on Saturday as intended.
 - Its page: `?net=testnet&pool=0x183AA811bFc913fCf5630cbAA4B85b3a8499a707&usdc=0x19B461A53e2A64205668a5FeFF5f0Fa6B428d1C4`.
-- Keeper host: an existing always-on host (since 2026-11-14 it runs the current pool with the keeper
-  key; before that the 10-18 pool with the operator key), as its own systemd
+- Keeper host: an existing always-on host (since 2026-11-19 it runs the current pool with the keeper
+  key and `REF_COIN=xyz:TSLA`; 11-14 to 11-19 the 11-14 pool; before that the 10-18 pool with the operator key), as its own systemd
   service (`deploy/cohost/`: `bundle.sh` builds the code bundle, no key; `install.sh` installs it
   as `dayone-keeper`: its own user, `/opt/dayone-keeper` (root-owned releases and a
   checksum-verified Node), the key in `/etc/dayone-keeper` readable only by that user, one unit
@@ -108,14 +130,17 @@ a file only you can read (64 hex characters, with or without `0x`):
    Turn it off after deploying (the same command with `off`): while on, every EVM transaction from
    the address waits for a big block, about one a minute.
 3. `forge script script/DeployTestnet.s.sol --rpc-url $RPC --broadcast --legacy --slow --private-key $KEY`
-   (`PAUSER` from the exports makes the keeper's key the pauser; `SEED` changes the seed). It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
+   (`PAUSER` from the exports makes the keeper's key the pauser; `REPORTER=$PAUSER` also gives the
+   pool a `ReporterRef` that key writes, `maxRefOracleBps` `REF_BPS` (150); `SEED` changes the seed). It prints the mock USDC and pool addresses. Testnet defaults: `paramsDelay` 1 day, minimum
    position $100, per-lane cap $30K per 60 s (xyz:TSLA's mainnet safe cap), net OI $100K,
    `stressMoveBps` 10%, and a seed of `SEED` mock USDC (default 10,000, minted to the deployer and
    paid in for shares), which backs about $100K of longs and, separately, $100K of shorts
    (each side gross). How to choose these for another market: `docs/sizing.md`.
 4. Mint mock USDC to a trader (`cast send --legacy $USDC "mint(address,uint256)" …`; without
    `--legacy`, cast's fee estimate fails on this RPC with "invalid block range"), approve the pool, and
-   run the keeper with its own key: `RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$(cat $KEEPER_KEY_FILE) MARKET_HOURS=nyse node keeper/keeper.ts`.
+   run the keeper with its own key: `RPC_URL=$RPC POOL=$POOL PRIVATE_KEY=$(cat $KEEPER_KEY_FILE) MARKET_HOURS=nyse node keeper/keeper.ts`
+   (add `REF_COIN=xyz:TSLA` for a pool deployed with `REPORTER`: the keeper then pushes HL mainnet's
+   oracle for that market to the reference every minute).
    Only for the 10-18 pool (0x183A…, deployed before the pauser role and `claim()`): add
    `POOL_ABI=v1`, and the keeper then uses `setOpensPaused` with the operator key, and settle pays
    queued winners itself. `deploy/cohost/bundle.sh` writes `POOL_ABI` into `keeper.env`.

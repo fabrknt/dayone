@@ -16,7 +16,7 @@ wallet: [fabrknt.com/hip3/labs/day-one/app](https://fabrknt.com/hip3/labs/day-on
 |---|---|
 | See it work locally, no keys | `npm install && npm run demo` (below) |
 | Choose the seed, caps and latch for your market | `docs/sizing.md` |
-| Deploy a pool | `script/DeployTestnet.s.sol` (a testnet example: mock USDC, mark/mid/reference bounds off; see `docs/sizing.md` §5), `docs/testnet.md` |
+| Deploy a pool | `script/DeployTestnet.s.sol` (a testnet example: mock USDC, mark/mid bounds off, with `REPORTER` a testnet-only reference; see `docs/sizing.md` §5), `docs/testnet.md` |
 | Run the keeper (settle, liquidate, claim, poke) | `keeper/keeper.ts`; always-on: `deploy/cohost/` |
 | Pause outside the stock's trading hours or during a halt | `MARKET_HOURS=nyse\|krx`; `PRIMARY_HALTS=<symbol>` needs `prebell`, which is not public yet |
 | End a halted or delisted market | `noteFrozen`, `proposeEnd` / `applyEnd` (below) |
@@ -108,19 +108,23 @@ market's deployer while the book is thin, and retired once it is deep enough.
   pauser key that can only set and clear the trading-hours pause (`setHoursPaused`); the
   operator's own pause (`setOpensPaused`) is a different flag the keeper cannot clear.
 - **Hygiene.** A minimum position size, an on-chain list of active ids for keepers, a reentrancy
-  guard, and the optimizer on (23.5 KB runtime, under the 24 KB limit: 550 bytes left).
+  guard, and the optimizer on (23.5 KB runtime, under the 24 KB limit: 508 bytes left).
 
 When to retire the pool (graduation criteria, a deadline, stop conditions) is still a draft, to be
 settled with an operator; it is not published here.
 
 ## Layout
-- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (65 tests, including regressions for review
+- `src/LaunchPool.sol`, `test/LaunchPool.t.sol` (66 tests, including regressions for review
   findings: `test_r1_*` to `test_r12_*`, and for round 13 `test_frozenClockRestartsAfterAGapInSightings`;
   the halted-market tests are `test_halted*`, `test_frozen*` and `test_operatorEnd*`), `test/Invariant.t.sol` (5 invariants over random sequences
   of every action, parameter changes, latch trips, rearms and seeds; after each step: tokens == books, the debt queue's
   counters and order, per-side totals == positions, shares add up, equity <= shareValuation).
   `forge coverage --ir-minimum` on `LaunchPool.sol` (10-21): lines 98.5%, branches 89.9% (91.8% on 10-20,
   before the halted-market branches).
+- `src/testnet/ReporterRef.sol`: testnet only, a reference price one reporter key writes (the keeper,
+  `REF_COIN`), so a testnet oracle that stops or drifts trips the guard; it is only as good as the
+  reporter. Tested in `test_reporterRefFromTheStart`. A pool can start with a reference (the
+  constructor's last argument) instead of waiting `paramsDelay` for `proposeParams`.
 - `lib/hl-price-guard`: price reading and caps from HL Price Guard (`fabrknt/hl-price-guard`), as a
   submodule pinned to one commit. Policy: pin only tagged versions, and move to a newer tag on purpose
   (`git -C lib/hl-price-guard checkout vX.Y.Z`, then run the tests), never to its latest commit.
@@ -158,6 +162,9 @@ settled with an operator; it is not published here.
   `POOL_ABI=v1` for a pool deployed before the pauser role, `claim()` and the backing check
   (testnet 0x183A…), `POOL_ABI=v2` for one deployed after them but before the halted-market exits,
   set explicitly rather than guessed from a failed call.
+  With `REF_COIN=xyz:TSLA` (testnet only) it first pushes HL mainnet's oracle for that market to the
+  pool's `ReporterRef` once a minute; when pushes stop the reference goes stale and nothing settles.
+  `keeper/e2e.sh` does not cover it yet (checked on anvil and on testnet, `docs/testnet.md`).
   `keeper/e2e.sh` runs it end to end on anvil with the precompiles mocked at their real addresses,
   including a halt (the hour held, then settled at the frozen oracle), an operator end, a `POOL_ABI=v2`
   tick and a one-sided book clearing the clock.
@@ -218,14 +225,15 @@ KRX's 2027 calendar (after its year-end closure is set in December), NYSE beyond
 close positions left open after graduation (to settle with an operator);
 whether to cap each position's profit at notional × `stressMoveBps`, which would make the backing
 exact instead of assumed, at the cost of capped wins (as [hyperevm-perp](https://github.com/psyto/hyperevm-perp) does);
-the independent reference (`maxRefOracleBps` is 0 on testnet; `PythRef` needs Hermes update data,
+the independent reference (testnet uses `ReporterRef`, which the keeper writes from HL mainnet's oracle
+and which is not an independent signed price; `PythRef` needs Hermes update data,
 which has required an API key since 2026-08-26); the halted-market exits on the page (it does not yet
 show a frozen clock, a proposed end or an ended pool) and in `test/Invariant.t.sol` (its random
 sequences do not halt the book yet); on a market with no reference, a live book shorter than
 `FROZEN_GAP` between two keeper sightings that comes back to exactly the same oracle goes unseen, so
 watch that the keeper is alive.
 
-`forge test` (70 tests); `npm install && npm run demo` (36 checks with `prebell`, 32 without); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
+`forge test` (71 tests); `npm install && npm run demo` (36 checks with `prebell`, 32 without); `node --test keeper/krx.test.mjs`; `node keeper/claims.test.mjs`; `node web/room.test.mjs`.
 
 ## License
 Apache-2.0 (`LICENSE`).

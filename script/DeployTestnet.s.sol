@@ -3,7 +3,8 @@ pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
-import {LaunchPool, IERC20} from "../src/LaunchPool.sol";
+import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
+import {ReporterRef} from "../src/testnet/ReporterRef.sol";
 import {MockUSDC} from "../test/Mocks.sol";
 
 /// HyperEVM testnet (chain 998). Defaults to xyz:TSLA on testnet: xyz is dex 65 there, so the
@@ -11,6 +12,10 @@ import {MockUSDC} from "../test/Mocks.sol";
 ///
 /// The testnet book sits far from its oracle (mid 612 bp above it on 10-17), so the mark/mid
 /// bounds are off here; the jump latch, two-step settlement and both caps stay on.
+/// With REPORTER=<address> (the keeper's key, run with REF_COIN) the pool starts with a
+/// ReporterRef as its reference, maxRefOracleBps REF_BPS (default 150, safe-limits' first estimate
+/// for stocks in trading hours) and maxAge REF_MAX_AGE (default 180 s; the keeper pushes every 60 s).
+/// Testnet only: the reporter is trusted (src/testnet/ReporterRef.sol). Without it, no reference.
 /// A mock USDC is deployed as collateral; mint it with MockUSDC.mint. The pool is seeded with
 /// SEED (default 10,000) mock USDC, which with stressMoveBps at 10% backs about $100K of longs and,
 /// separately, $100K of shorts (each side gross: the backing check never nets them).
@@ -23,12 +28,16 @@ contract DeployTestnet is Script {
         uint32 index = uint32(vm.envOr("INDEX", uint256(1)));
         uint8 szDecimals = uint8(vm.envOr("SZ_DECIMALS", uint256(3)));
         uint256 usdc = 1e6;
+        address reporter = vm.envOr("REPORTER", address(0));
+        uint16 refBps = reporter == address(0) ? 0 : uint16(vm.envOr("REF_BPS", uint256(150)));
         vm.startBroadcast();
+        IRefSource ref =
+            reporter == address(0) ? IRefSource(address(0)) : new ReporterRef(reporter, vm.envOr("REF_MAX_AGE", uint256(180)));
         MockUSDC token = new MockUSDC();
         LaunchPool pool = new LaunchPool(
             IERC20(address(token)),
             HLPriceGuard.Asset({dex: dex, index: index, szDecimals: szDecimals}),
-            HLPriceGuard.Bounds({maxMarkOracleBps: 0, maxMidOracleBps: 0, maxSpreadBps: 100, maxRefOracleBps: 0}),
+            HLPriceGuard.Bounds({maxMarkOracleBps: 0, maxMidOracleBps: 0, maxSpreadBps: 100, maxRefOracleBps: refBps}),
             LaunchPool.Params({
                 maxLeverage: 20,
                 maintenanceBps: 250,
@@ -49,7 +58,8 @@ contract DeployTestnet is Script {
                 stressMoveBps: 1000 // takes new positions only while a 10% move stays payable
             }),
             0,
-            1 days // paramsDelay
+            1 days, // paramsDelay
+            ref
         );
         address pauser = vm.envOr("PAUSER", address(0)); // the keeper's key: trading-hours pause only
         if (pauser != address(0)) pool.setPauser(pauser);
@@ -61,5 +71,6 @@ contract DeployTestnet is Script {
         vm.stopBroadcast();
         console.log("usdc", address(token));
         console.log("pool", address(pool));
+        console.log("ref", address(ref));
     }
 }

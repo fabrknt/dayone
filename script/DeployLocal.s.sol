@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Script} from "forge-std/Script.sol";
 import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
-import {LaunchPool, IERC20} from "../src/LaunchPool.sol";
+import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
 import {MockUSDC} from "../test/Mocks.sol";
 
 /// Local end-to-end only (keeper/e2e.sh): a mock USDC and a pool on xyz:TSLA's encodings.
@@ -38,7 +38,8 @@ contract DeployLocal is Script {
                 stressMoveBps: uint16(vm.envOr("STRESS_BPS", uint256(0)))
             }),
             0,
-            60 // paramsDelay
+            60, // paramsDelay
+            IRefSource(address(0))
         );
         vm.stopBroadcast();
         vm.writeFile("keeper/.local.json", string.concat(

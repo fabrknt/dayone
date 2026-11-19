@@ -6,6 +6,7 @@ import {HLPriceGuard} from "hl-price-guard/HLPriceGuard.sol";
 import {ExposureBudget} from "hl-price-guard/ExposureBudget.sol";
 import {LaunchPool, IERC20, IRefSource} from "../src/LaunchPool.sol";
 import {MockPrecompile, MockUSDC} from "./Mocks.sol";
+import {ReporterRef} from "../src/testnet/ReporterRef.sol";
 import {HLTest} from "hl-price-guard/test/HLTest.sol";
 
 contract MockRef is IRefSource {
@@ -43,7 +44,8 @@ contract LaunchPoolTest is HLTest {
             HLPriceGuard.Bounds({maxMarkOracleBps: 25, maxMidOracleBps: 25, maxSpreadBps: 20, maxRefOracleBps: 150}),
             defaultParams(),
             0,
-            1 days
+            1 days,
+            IRefSource(address(0))
         );
         for (uint256 i; i < 2; i++) {
             address u = i == 0 ? alice : bob;
@@ -219,6 +221,47 @@ contract LaunchPoolTest is HLTest {
         vm.prank(alice);
         pool.cancelOpen(id);
         assertEq(usdc.balanceOf(alice), 1_000_000 * USDC);
+    }
+
+    /// The testnet reference: a pool can start with it, settles nothing before the first push or
+    /// once the push is older than maxAge, refuses an oracle the reporter disagrees with, and only
+    /// the reporter can push.
+    function test_reporterRefFromTheStart() public {
+        ReporterRef r = new ReporterRef(bob, 60);
+        LaunchPool p = new LaunchPool(
+            IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), defaultParams(), 0, 1 days, r
+        );
+        assertEq(address(p.refSource()), address(r));
+        vm.prank(alice);
+        usdc.approve(address(p), type(uint256).max);
+        vm.prank(alice);
+        uint256 id = p.requestOpen(true, 1_000 * USDC, 10);
+        vm.warp(block.timestamp + 3);
+        vm.expectRevert(
+            abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.RefStale, block.timestamp, 60)
+        );
+        p.settle(id); // never pushed
+
+        vm.expectRevert(ReporterRef.NotReporter.selector);
+        r.push(350e18);
+        vm.startPrank(bob);
+        vm.expectRevert(ReporterRef.BadPrice.selector);
+        r.push(0);
+        r.push(360e18); // 278 bp above the oracle, as a stuck testnet oracle was below HL mainnet's
+        vm.stopPrank();
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.RefOracle, 278, 150));
+        p.settle(id);
+
+        vm.prank(bob);
+        r.push(351e18); // 29 bp
+        vm.warp(block.timestamp + 61);
+        vm.expectRevert(abi.encodeWithSelector(LaunchPool.Breach.selector, HLPriceGuard.Breach.RefStale, 61, 60));
+        p.settle(id);
+        vm.prank(bob);
+        r.push(351e18);
+        p.settle(id);
+        (,,,, uint256 entry,,,,,,,) = p.positions(id);
+        assertEq(entry, 350e18);
     }
 
     function test_outOfHoursAndGraduation() public {
@@ -892,8 +935,8 @@ contract LaunchPoolTest is HLTest {
     function test_r10_arithmeticLimits() public {
         HLPriceGuard.Bounds memory b = HLPriceGuard.Bounds(25, 25, 20, 150);
         vm.expectRevert(LaunchPool.BadParams.selector);
-        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 7), b, defaultParams(), 0, 1 days);
-        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 6), b, defaultParams(), 0, 1 days);
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 7), b, defaultParams(), 0, 1 days, IRefSource(address(0)));
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 6), b, defaultParams(), 0, 1 days, IRefSource(address(0)));
 
         // $100.0001 notional at 5 bp is $0.05000005 of fee: charged as 50,001 base units
         uint256 before = usdc.balanceOf(alice);
@@ -936,7 +979,7 @@ contract LaunchPoolTest is HLTest {
         params.stressMoveBps = 1000;
         params.redeemBufferBps = redeemBufferBps;
         p = new LaunchPool(
-            IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), params, 0, 1 days
+            IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), params, 0, 1 days, IRefSource(address(0))
         );
         for (uint256 i; i < 2; i++) {
             vm.prank(i == 0 ? alice : bob);
@@ -1091,7 +1134,7 @@ contract LaunchPoolTest is HLTest {
         params.stressMoveBps = 500;
         p.proposeParams(params, HLPriceGuard.Bounds(25, 25, 20, 150), IRefSource(address(0)));
         vm.expectRevert(LaunchPool.BadParams.selector);
-        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), defaultParams(), 0, 1 days);
+        new LaunchPool(IERC20(address(usdc)), HLPriceGuard.Asset(1, 1, 3), HLPriceGuard.Bounds(25, 25, 20, 150), defaultParams(), 0, 1 days, IRefSource(address(0)));
     }
 
     /// While a winner is queued nothing new opens: requests are refused and a pending open

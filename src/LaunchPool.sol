@@ -230,7 +230,8 @@ contract LaunchPool {
         HLPriceGuard.Bounds memory bounds_,
         Params memory params_,
         uint256 minReserve_,
-        uint64 paramsDelay_
+        uint64 paramsDelay_,
+        IRefSource refSource_ // the independent reference from the start; address(0) for none
     ) {
         _validate(params_);
         if (asset_.szDecimals > MAX_SZ_DECIMALS) revert BadParams();
@@ -239,6 +240,7 @@ contract LaunchPool {
         operator = msg.sender;
         asset = asset_;
         bounds = bounds_;
+        refSource = refSource_;
         _params = params_;
         minReserve = minReserve_;
     }

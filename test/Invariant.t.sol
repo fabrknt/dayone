@@ -33,7 +33,8 @@ contract Handler is Test {
             HLPriceGuard.Bounds({maxMarkOracleBps: 25, maxMidOracleBps: 25, maxSpreadBps: 20, maxRefOracleBps: 150}),
             p,
             0,
-            1 days
+            1 days,
+            IRefSource(address(0))
         );
         // starting capital: the backing check takes no positions on an empty pool
         usdc.mint(address(this), 10_000_000 * USDC);

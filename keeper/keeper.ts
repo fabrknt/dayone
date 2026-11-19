@@ -2,6 +2,8 @@
 //
 //   RPC_URL=... POOL=0x... PRIVATE_KEY=0x... node keeper/keeper.ts [--once]
 //   (POOL_ABI=v1 for a pool deployed before the pauser role and claim(), e.g. testnet 0x183A…)
+//   (REF_COIN=xyz:TSLA, testnet only, for a pool whose reference is a ReporterRef this key writes:
+//   pushes HL mainnet's oracle for that market every REF_PUSH_MS, before the tick's reads)
 //
 // Every tick (TICK_MS, default 1 s; 3 s on the public RPC), after one batched read:
 //   1. with MARKET_HOURS=nyse or krx (the pool's pauser key, or the operator's), pause new positions while that
@@ -28,7 +30,7 @@ import { readFileSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import {
   createPublicClient, createWalletClient, http, custom, decodeAbiParameters, encodeAbiParameters,
-  encodeFunctionData, decodeFunctionResult, parseAbi,
+  encodeFunctionData, decodeFunctionResult, parseAbi, parseUnits,
   BaseError, ContractFunctionRevertedError, type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -144,11 +146,12 @@ function why(e: unknown): string {
 /// The limit stays under the 2M small-block cap; work estimated above it needs big blocks and is
 /// logged, not sent. Only a receipt with status success counts as done.
 const SMALL_BLOCK_GAS = 2_000_000n;
-async function send(functionName: string, args: unknown[] = []): Promise<boolean> {
+async function send(functionName: string, args: unknown[] = [], to: { address: Address; abi: any; quiet?: boolean } = { address: pool, abi }): Promise<boolean> {
   let hash: Hex | undefined;
   try {
-    const { request } = await pub.simulateContract({ account, address: pool, abi, functionName, args });
-    const gas = await pub.estimateContractGas({ account, address: pool, abi, functionName, args });
+    const { address, abi } = to;
+    const { request } = await pub.simulateContract({ account, address, abi, functionName, args });
+    const gas = await pub.estimateContractGas({ account, address, abi, functionName, args });
     if (gas >= SMALL_BLOCK_GAS) {
       console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) NEEDS BIG BLOCKS: estimate ${gas}`);
       return false;
@@ -161,7 +164,7 @@ async function send(functionName: string, args: unknown[] = []): Promise<boolean
       console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) REVERTED on chain ${hash} (gas ${receipt.gasUsed})`);
       return false;
     }
-    console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
+    if (!to.quiet) console.log(`${new Date().toISOString()} ${functionName}(${args.join(", ")}) ok ${hash}`);
     return true;
   } catch (e) {
     // a failed receipt read (e.g. the RPC's rate limit) after the send says nothing about the tx:
@@ -250,9 +253,60 @@ async function keepSighting(): Promise<boolean> {
   return true;
 }
 
+// REF_COIN=xyz:TSLA (testnet only): push HL mainnet's oracle for that market to the pool's
+// ReporterRef (src/testnet/ReporterRef.sol) every REF_PUSH_MS, so a testnet oracle that stops or
+// drifts from it trips the guard. This key must be the ReporterRef's reporter. A failed read or push
+// is retried after 10 s; if pushes stop, the reference goes stale and the pool settles nothing,
+// which is the intended failure.
+const refCoin = process.env.REF_COIN;
+const REF_API = process.env.REF_API ?? "https://api.hyperliquid.xyz/info";
+const REF_PUSH_MS = intEnv("REF_PUSH_MS", 60_000, 3_600_000);
+const refAbi = parseAbi(["function push(uint256 price)", "function reporter() view returns (address)"]);
+let refAt: Address | undefined;
+let refPushMs = -Infinity;
+let refPushed = false; // the first push is logged, later ones only when they fail
+
+async function refPrice(): Promise<bigint> {
+  const dex = refCoin!.includes(":") ? refCoin!.split(":")[0] : "";
+  const res = await fetch(REF_API, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "metaAndAssetCtxs", dex }), signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`${REF_API} answered ${res.status}`);
+  const [meta, ctxs] = await res.json();
+  const i = meta.universe.findIndex((a: { name: string }) => a.name === refCoin);
+  const px = i < 0 ? undefined : ctxs[i]?.oraclePx;
+  if (typeof px !== "string" || !(Number(px) > 0)) throw new Error(`no oracle for ${refCoin} at ${REF_API}`);
+  return parseUnits(px, 18);
+}
+
+async function pushRef() {
+  if (Date.now() - refPushMs < REF_PUSH_MS) return;
+  if (!refAt) {
+    const at = (await read("refSource")) as Address;
+    if (BigInt(at) === 0n) throw new Error("REF_COIN is set but the pool has no reference source");
+    const reporter = await pub.readContract({ address: at, abi: refAbi, functionName: "reporter" });
+    if (reporter.toLowerCase() !== account.address.toLowerCase()) throw new Error(`REF_COIN is set but the reference's reporter is ${reporter}, not this key`);
+    refAt = at;
+  }
+  let price: bigint;
+  try {
+    price = await refPrice();
+  } catch (e) {
+    console.log(`${new Date().toISOString()} reference read failed: ${why(e)}`);
+    refPushMs = Date.now() - REF_PUSH_MS + 10_000;
+    return;
+  }
+  const ok = await send("push", [price], { address: refAt, abi: refAbi, quiet: refPushed });
+  refPushMs = ok ? Date.now() : Date.now() - REF_PUSH_MS + 10_000;
+  refPushed ||= ok;
+}
+
 async function tick() {
   tickNo++;
   sighting = false;
+  // before the reads, so a settle this tick sees the fresh reference
+  if (refCoin) await pushRef();
   // started now, so it overlaps the chain reads; a feed slower than them still delays the tick,
   // liquidations included, by at most its 10 s timeout
   const halts = haltSymbol ? readHalts() : undefined;
