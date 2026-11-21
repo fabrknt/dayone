@@ -38,6 +38,19 @@ Older entries far from the price use up more room. Pick `stressMoveBps` from the
 expect between two keeper ticks that matters: an earnings gap or the open after a weekend for a
 stock perp. It cannot go under 5% off a local chain (`MIN_STRESS_BPS`).
 
+For xyz:TSLA, the testnet pool at 10%: from 2010-06-29 to 2026-11-20 TSLA's move from one close to
+the next open passed 10% on 26 of 4,125 closures (17 weeknights, 6 weekends, 3 holidays), at most
++25.7% (2013-05-09) and −14.9% (2020-09-08). On those closures the backing check no longer
+promises that every winner is paid from the balance; whether any profit actually waits in the
+FIFO queue depends on the open interest, the entries and the balance at the time. 17% would have
+covered every weekend and holiday since 2010; only weeknights went further. These are the moves
+of a price held across the closure, and xyz's oracle out of hours is not that, so they bound the
+size of the gap rather than predict the move between two keeper ticks. Per-name tables (p99 and
+the largest fall and rise for each closure type, for SPY, QQQ, NVDA, MSTR and others; every move
+over 10%) and the script are in
+[fabrknt/research `2026-11-21-lender-thresholds`](https://github.com/fabrknt/research/tree/9e88cc6/2026-11-21-lender-thresholds)
+(`results/closures.csv`, `results/exceedances.csv`).
+
 `maxNetNotional` is a different limit: it caps |long − short| open interest, what one move can
 cost the pool in the end. The backing check is usually the tighter of the two while the pool is
 small.
